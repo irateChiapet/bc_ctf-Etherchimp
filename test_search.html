@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Search Function Test</title>
+</head>
+<body>
+    <h1>Testing Packet Payload Search</h1>
+    <div id="results"></div>
+
+    <script>
+        // Copy the search functions from search-handler.js
+        function extractPacketText(packetData) {
+            if (!packetData || packetData.length === 0) return '';
+            let text = '';
+            for (let i = 0; i < packetData.length && i < 1500; i++) {
+                const byte = packetData[i];
+                if (byte >= 32 && byte <= 126) {
+                    text += String.fromCharCode(byte);
+                } else if (byte === 10 || byte === 13) {
+                    text += ' ';
+                }
+            }
+            return text.toLowerCase();
+        }
+
+        // Fetch the PCAP data from backend
+        fetch('/upload', {
+            method: 'POST',
+            body: (() => {
+                const formData = new FormData();
+                // This won't work directly, but shows the concept
+                return formData;
+            })()
+        });
+
+        // Simpler: fetch autoload data
+        fetch('/autoload')
+            .then(response => response.json())
+            .then(data => {
+                if (data.packets) {
+                    console.log(`Loaded ${data.packets.length} packets`);
+
+                    // Test search for "amy.parker"
+                    const searchTerm = "amy.parker";
+                    let matches = 0;
+                    const matchingPackets = [];
+
+                    data.packets.forEach((packet, idx) => {
+                        if (packet.data && packet.data.length > 0) {
+                            const packetText = extractPacketText(packet.data);
+                            if (packetText.includes(searchTerm)) {
+                                matches++;
+                                if (matches <= 5) {
+                                    const matchIndex = packetText.indexOf(searchTerm);
+                                    const start = Math.max(0, matchIndex - 30);
+                                    const end = Math.min(packetText.length, matchIndex + searchTerm.length + 30);
+                                    const snippet = packetText.substring(start, end);
+                                    matchingPackets.push({
+                                        index: idx,
+                                        source: packet.source,
+                                        dest: packet.destination,
+                                        protocol: packet.protocol,
+                                        snippet: snippet
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    const resultsDiv = document.getElementById('results');
+                    resultsDiv.innerHTML = `
+                        <h2>Search Results for "${searchTerm}"</h2>
+                        <p>Found ${matches} packets containing the search term.</p>
+                        <h3>First 5 matches:</h3>
+                    `;
+
+                    matchingPackets.forEach((match, i) => {
+                        resultsDiv.innerHTML += `
+                            <div style="margin: 10px 0; padding: 10px; border: 1px solid #ccc;">
+                                <strong>Match ${i + 1}:</strong> Packet #${match.index}<br>
+                                <strong>Connection:</strong> ${match.source} → ${match.dest}<br>
+                                <strong>Protocol:</strong> ${match.protocol}<br>
+                                <strong>Snippet:</strong> <code>...${match.snippet}...</code>
+                            </div>
+                        `;
+                    });
+
+                    console.log(`Found ${matches} packets with "${searchTerm}"`);
+                } else {
+                    document.getElementById('results').innerHTML = '<p>No autoload data available. Use -f option to load a PCAP file.</p>';
+                }
+            })
+            .catch(err => {
+                document.getElementById('results').innerHTML = `<p>Error: ${err}</p>`;
+                console.error(err);
+            });
+    </script>
+</body>
+</html>

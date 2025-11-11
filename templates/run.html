@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EtherChimp</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div id="container">
+        <div id="sidebar">
+            <div class="header">
+                <div class="header-content">
+                    <img src="/static/etherchimp.png" alt="EtherChimp" class="header-logo" id="headerLogo">
+                    <div class="subtitle">Real-time Network Traffic Analysis</div>
+                </div>
+            </div>
+            
+            <div class="upload-section">
+                <div class="upload-area" id="uploadArea">
+                    <div class="upload-icon">📄</div>
+                    <div class="upload-text">Drop PCAP file here or click to browse</div>
+                    <div class="upload-subtext">Supports .pcap and .pcapng formats</div>
+                </div>
+                <input type="file" id="fileInput" accept=".pcap,.pcapng">
+            </div>
+            
+            <div class="stats-container">
+                <div class="stat-group">
+                    <div class="stat-group-title">Traffic Overview</div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Packets</div>
+                        <div class="stat-value" id="totalPackets">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Unique Hosts</div>
+                        <div class="stat-value" id="uniqueHosts">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Active Connections</div>
+                        <div class="stat-value" id="activeConnections">0</div>
+                    </div>
+                </div>
+                
+                <div class="stat-group">
+                    <div class="stat-group-title">Data Analysis</div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Volume</div>
+                        <div class="stat-value"><span id="dataVolume">0</span><span class="stat-unit">MB</span></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg Packet Size</div>
+                        <div class="stat-value"><span id="avgPacketSize">0</span><span class="stat-unit">bytes</span></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Protocols Detected</div>
+                        <div class="stat-value" id="protocolCount">0</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="alerts-section">
+                <div class="alerts-header" id="alertsHeaderBtn">
+                    <div class="alerts-title">
+                        🔔 Security Alerts
+                    </div>
+                    <div class="alert-count" id="alertCount">0</div>
+                </div>
+                <div class="alerts-list" id="alertsList"></div>
+            </div>
+
+            <div class="alerts-icon" id="alertsIcon">🔔</div>
+
+            <div class="alerts-panel" id="alertsPanel">
+                <div class="alerts-panel-header">
+                    <div class="alerts-panel-title">Security Alerts</div>
+                    <button class="alerts-panel-close" id="alertsPanelClose">✕</button>
+                </div>
+                <div class="alerts-search">
+                    <input type="text" class="alerts-search-input" id="alertsSearchInput" placeholder="Search alerts...">
+                </div>
+                <div class="alerts-panel-list" id="alertsPanelList"></div>
+            </div>
+        </div>
+        
+        <div id="visualization">
+            <canvas id="networkCanvas"></canvas>
+
+            <button class="sidebar-reopen" id="sidebarReopen">☰</button>
+
+            <div class="search-icon" id="searchIcon">🔍</div>
+
+            <div class="search-container" id="searchContainer">
+                <div class="search-input-wrapper">
+                    <input type="text" class="search-input" id="searchInput" placeholder="🔍 Search anything: IPs, hostnames, ports, protocols, packet payloads, hex patterns...">
+                </div>
+                <div class="search-results" id="searchResults" style="max-height: 500px; overflow-y: auto;"></div>
+            </div>
+
+            <div class="inventory-icon" id="inventoryIcon">📋</div>
+
+            <div class="settings-cog" id="settingsCog">⚙️</div>
+
+            <div class="inventory-panel" id="inventoryPanel">
+                <div class="inventory-panel-header">
+                    <div class="inventory-panel-title">📊 Network Inventory</div>
+                    <button class="inventory-panel-close" id="inventoryPanelClose">✕</button>
+                </div>
+                <div class="inventory-search">
+                    <input type="text" class="inventory-search-input" id="inventorySearchInput" placeholder="Search by IP or MAC...">
+                </div>
+                <div class="inventory-stats">
+                    <div class="inventory-stat">
+                        <span class="inventory-stat-label">Total Hosts:</span>
+                        <span class="inventory-stat-value" id="inventoryTotalHosts">0</span>
+                    </div>
+                    <div class="inventory-stat">
+                        <span class="inventory-stat-label">Total Traffic:</span>
+                        <span class="inventory-stat-value" id="inventoryTotalTraffic">0 MB</span>
+                    </div>
+                </div>
+                <div class="inventory-panel-list" id="inventoryPanelList"></div>
+            </div>
+
+            <div class="settings-menu" id="settingsMenu">
+                <button class="control-btn" id="playBtn">▶️ Play</button>
+                <button class="control-btn" id="resetBtn">↻ Reset</button>
+                <button class="control-btn" id="layoutBtn">◫ Layout</button>
+                <button class="control-btn" id="filterBtn">◐ Filter Suspicious</button>
+                <button class="control-btn" id="hideInactiveBtn">◌ Hide Low Traffic</button>
+                <button class="control-btn" id="jiggleBtn">◎ Jiggle Off</button>
+                <button class="control-btn" id="saveCaptureBtn" style="display: none;">💾 Save Capture</button>
+                <button class="control-btn" id="themeBtn">◐ Dark Mode</button>
+            </div>
+
+            <div class="stream-icon" id="streamIcon">⚡</div>
+
+            <div class="stream-panel" id="streamPanel">
+                <div class="stream-panel-title">TCP/HTTP Streams</div>
+                <div id="streamList"></div>
+            </div>
+
+            <div class="legend-icon" id="legendIcon">◉</div>
+
+            <div class="rider-icon" id="riderIcon">🐵</div>
+
+            <div class="protocol-legend" id="protocolLegend">
+                <div class="legend-title">Protocol Colors</div>
+                <div class="legend-item" data-protocol="HTTP">
+                    <div class="legend-color" style="background: #ff6600;"></div>
+                    <span>HTTP</span>
+                </div>
+                <div class="legend-item" data-protocol="HTTPS">
+                    <div class="legend-color" style="background: #00ff00;"></div>
+                    <span>HTTPS</span>
+                </div>
+                <div class="legend-item" data-protocol="FTP">
+                    <div class="legend-color" style="background: #ff3399;"></div>
+                    <span>FTP</span>
+                </div>
+                <div class="legend-item" data-protocol="SSH">
+                    <div class="legend-color" style="background: #ff00ff;"></div>
+                    <span>SSH</span>
+                </div>
+                <div class="legend-item" data-protocol="DNS">
+                    <div class="legend-color" style="background: #9966ff;"></div>
+                    <span>DNS</span>
+                </div>
+                <div class="legend-item" data-protocol="ARP">
+                    <div class="legend-color" style="background: #00ffff;"></div>
+                    <span>ARP</span>
+                </div>
+                <div class="legend-item" data-protocol="TCP">
+                    <div class="legend-color" style="background: #00ff00;"></div>
+                    <span>TCP</span>
+                </div>
+                <div class="legend-item" data-protocol="UDP">
+                    <div class="legend-color" style="background: #0099ff;"></div>
+                    <span>UDP</span>
+                </div>
+                <div class="legend-item" data-protocol="ICMP">
+                    <div class="legend-color" style="background: #ffff00;"></div>
+                    <span>ICMP</span>
+                </div>
+                <div class="legend-item" data-protocol="BOOTP">
+                    <div class="legend-color" style="background: #ffcc00;"></div>
+                    <span>BOOTP</span>
+                </div>
+                <div class="legend-item" data-protocol="Other">
+                    <div class="legend-color" style="background: #ffffff;"></div>
+                    <span>Other</span>
+                </div>
+            </div>
+
+            <div class="info-panel" id="infoPanel">
+                <div class="info-title">Real-time Metrics</div>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <div class="info-label">Packets/sec</div>
+                        <div class="info-value" id="packetsPerSec">0</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Bandwidth</div>
+                        <div class="info-value" id="bandwidth">0 Mbps</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Active Flows</div>
+                        <div class="info-value" id="activeFlows">0</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Threats</div>
+                        <div class="info-value" id="threats" style="color: #ff6b6b;">0</div>
+                    </div>
+                </div>
+                <div id="packetDataSection" style="display: none; margin-top: 16px; padding-top: 16px; border-top: 1px solid #333;">
+                    <div class="info-title">Selected Packet Data</div>
+                    <div id="packetDataContent" style="font-family: monospace; font-size: 11px; color: #aaa; max-height: 200px; overflow-y: auto;"></div>
+                </div>
+            </div>
+            
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">Processing PCAP file...</div>
+                <div class="loading-progress" id="loadingProgress">0%</div>
+            </div>
+
+            <div class="tooltip" id="tooltip">
+                <button class="tooltip-close" id="tooltipClose">✕</button>
+            </div>
+
+            <div class="node-dashboard" id="nodeDashboard">
+                <div class="dashboard-header">
+                    <div class="dashboard-title" id="dashboardTitle">Node Information</div>
+                    <button class="dashboard-close" id="dashboardClose">✕</button>
+                </div>
+                <div class="dashboard-content">
+                    <div class="dashboard-section">
+                        <div class="dashboard-section-title">Traffic Statistics</div>
+                        <div id="dashboardStats"></div>
+                    </div>
+                    <div class="dashboard-section">
+                        <div class="dashboard-section-title">Connection Details</div>
+                        <div id="dashboardConnections"></div>
+                    </div>
+                    <div class="dashboard-section dashboard-packets">
+                        <div class="dashboard-section-title" id="packetSectionTitle" style="cursor: pointer;">
+                            Packets From Source (Most Recent 100) <span style="font-size: 10px; opacity: 0.7;">↗ Click to expand</span>
+                        </div>
+                        <div class="packet-list" id="dashboardPackets"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="timeline-container" id="timelineContainer">
+                <div class="timeline-header">
+                    <div class="timeline-title">Timeline</div>
+                    <div class="timeline-time" id="timelineTime">0.00s</div>
+                </div>
+                <div class="timeline-slider" id="timelineSlider">
+                    <div class="timeline-progress" id="timelineProgress">
+                        <div class="timeline-handle"></div>
+                    </div>
+                </div>
+                <div class="timeline-labels">
+                    <span id="timelineStart">0.00s</span>
+                    <span id="timelineEnd">0.00s</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+        <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+        <script src="/static/js/modules/search-handler.js?v=3.0"></script>
+        <script src="/static/js/app.js?v=3.0"></script>
+</body>
+</html>

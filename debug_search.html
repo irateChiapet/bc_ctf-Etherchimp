@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Search Debug</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #fff; }
+        .section { margin: 20px 0; padding: 15px; background: #2a2a2a; border-radius: 5px; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #0099ff; color: white; border: none; border-radius: 3px; }
+        input { padding: 10px; width: 300px; font-size: 14px; }
+        pre { background: #000; padding: 10px; overflow-x: auto; font-size: 11px; }
+        .match { background: yellow; color: black; padding: 2px; }
+
+        .match-item {
+            margin: 10px 0;
+            padding: 12px;
+            background: #333;
+            border-radius: 5px;
+            border-left: 3px solid #0099ff;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .match-item:hover {
+            background: #3a3a3a;
+        }
+        .match-header {
+            font-weight: bold;
+            color: #0099ff;
+            margin-bottom: 5px;
+        }
+        .match-details {
+            color: #ccc;
+            font-size: 12px;
+        }
+        .match-snippet {
+            margin-top: 8px;
+            padding: 8px;
+            background: #1a1a1a;
+            border-radius: 3px;
+            font-size: 11px;
+        }
+        .packet-data {
+            display: none;
+            margin-top: 12px;
+            padding: 12px;
+            background: #000;
+            border-radius: 5px;
+            border: 1px solid #0099ff;
+        }
+        .packet-data.expanded {
+            display: block;
+        }
+        .packet-data-title {
+            color: #0099ff;
+            font-weight: bold;
+            margin-bottom: 8px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #444;
+        }
+        .hex-dump {
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            line-height: 1.5;
+            color: #0f0;
+            white-space: pre;
+        }
+        .ascii-dump {
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #ff0;
+            white-space: pre-wrap;
+        }
+        .expand-hint {
+            color: #666;
+            font-size: 10px;
+            margin-top: 5px;
+        }
+        .stats-summary {
+            background: #000;
+            padding: 10px;
+            border-radius: 3px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Search Function Debug Tool</h1>
+
+    <div class="section">
+        <h3>Step 1: Load Data</h3>
+        <button onclick="loadData()">Load PCAP Data</button>
+        <div id="loadStatus"></div>
+    </div>
+
+    <div class="section">
+        <h3>Step 2: Test Search</h3>
+        <input type="text" id="searchTerm" placeholder="Enter search term (e.g., amy)" value="amy">
+        <button onclick="testSearch()">Search</button>
+        <div id="searchResults"></div>
+    </div>
+
+    <script>
+        let allPackets = [];
+
+        function extractPacketText(packetData) {
+            if (!packetData || packetData.length === 0) return '';
+            let text = '';
+            for (let i = 0; i < packetData.length && i < 1500; i++) {
+                const byte = packetData[i];
+                if (byte >= 32 && byte <= 126) {
+                    text += String.fromCharCode(byte);
+                } else if (byte === 10 || byte === 13) {
+                    text += ' ';
+                }
+            }
+            return text.toLowerCase();
+        }
+
+        function formatHexDump(data, bytesPerLine = 16) {
+            if (!data || data.length === 0) return 'No data available';
+
+            const lines = [];
+            for (let i = 0; i < data.length; i += bytesPerLine) {
+                // Offset
+                const offset = i.toString(16).padStart(4, '0');
+
+                // Hex bytes
+                const hexBytes = [];
+                const asciiBytes = [];
+                for (let j = 0; j < bytesPerLine; j++) {
+                    if (i + j < data.length) {
+                        const byte = data[i + j];
+                        hexBytes.push(byte.toString(16).padStart(2, '0'));
+                        asciiBytes.push((byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.');
+                    } else {
+                        hexBytes.push('  ');
+                        asciiBytes.push(' ');
+                    }
+                }
+
+                // Format: offset  hex bytes (8) (8)  |ascii|
+                const firstHalf = hexBytes.slice(0, 8).join(' ');
+                const secondHalf = hexBytes.slice(8).join(' ');
+                const hexPart = `${firstHalf}  ${secondHalf}`.padEnd(50, ' ');
+
+                lines.push(`${offset}  ${hexPart} |${asciiBytes.join('')}|`);
+            }
+            return lines.join('\n');
+        }
+
+        function formatAsciiDump(data) {
+            if (!data || data.length === 0) return 'No data available';
+
+            let result = '';
+            for (let i = 0; i < data.length; i++) {
+                const byte = data[i];
+                if (byte >= 32 && byte <= 126) {
+                    result += String.fromCharCode(byte);
+                } else if (byte === 10) {
+                    result += '\n';
+                } else if (byte === 13) {
+                    result += '';
+                } else {
+                    result += '.';
+                }
+            }
+            return result;
+        }
+
+        function togglePacketData(matchId) {
+            const element = document.getElementById(`packet-data-${matchId}`);
+            if (element) {
+                element.classList.toggle('expanded');
+            }
+        }
+
+        function loadData() {
+            const status = document.getElementById('loadStatus');
+            status.innerHTML = 'Loading...';
+
+            fetch('/autoload')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.packets) {
+                        allPackets = data.packets;
+                        const withData = allPackets.filter(p => p.data && p.data.length > 0).length;
+
+                        status.innerHTML = `
+                            <pre>✓ Loaded ${allPackets.length} packets
+✓ ${withData} packets have data
+✓ First packet: ${allPackets[0].source} → ${allPackets[0].destination}
+✓ First packet data type: ${Array.isArray(allPackets[0].data) ? 'Array' : typeof allPackets[0].data}
+✓ First packet data length: ${allPackets[0].data ? allPackets[0].data.length : 0}
+✓ Sample bytes: [${allPackets[0].data.slice(0, 20).join(', ')}]
+✓ Sample text: ${extractPacketText(allPackets[0].data).substring(0, 100)}</pre>
+                        `;
+                    } else {
+                        status.innerHTML = '<pre style="color: red;">✗ No packets in response</pre>';
+                    }
+                })
+                .catch(err => {
+                    status.innerHTML = `<pre style="color: red;">✗ Error: ${err}</pre>`;
+                });
+        }
+
+        function testSearch() {
+            const searchTerm = document.getElementById('searchTerm').value.trim().toLowerCase();
+            const results = document.getElementById('searchResults');
+
+            if (allPackets.length === 0) {
+                results.innerHTML = '<pre style="color: red;">Please load data first!</pre>';
+                return;
+            }
+
+            results.innerHTML = '<pre>Searching...</pre>';
+
+            let matches = [];
+            let packetsWithData = 0;
+
+            allPackets.forEach((packet, idx) => {
+                if (packet.data && packet.data.length > 0) {
+                    packetsWithData++;
+                    const packetText = extractPacketText(packet.data);
+
+                    if (packetText.includes(searchTerm)) {
+                        const pos = packetText.indexOf(searchTerm);
+                        const start = Math.max(0, pos - 40);
+                        const end = Math.min(packetText.length, pos + searchTerm.length + 40);
+                        const snippet = packetText.substring(start, end);
+
+                        matches.push({
+                            index: idx,
+                            packet: packet,
+                            source: packet.source,
+                            dest: packet.destination,
+                            protocol: packet.protocol,
+                            snippet: snippet,
+                            position: pos
+                        });
+                    }
+                }
+            });
+
+            if (matches.length === 0) {
+                results.innerHTML = `
+                    <div class="stats-summary">
+                        <pre>Search Term: "${searchTerm}"
+Total Packets: ${allPackets.length}
+Packets with Data: ${packetsWithData}
+<span style="color: orange;">Matches Found: 0</span>
+
+Debug Info:
+- First packet text (first 200 chars): ${extractPacketText(allPackets[0].data).substring(0, 200)}</pre>
+                    </div>
+                `;
+                return;
+            }
+
+            // Build HTML with expandable matches
+            let html = `
+                <div class="stats-summary">
+                    <pre>Search Term: "${searchTerm}"
+Total Packets: ${allPackets.length}
+Packets with Data: ${packetsWithData}
+<span style="color: #0f0;">Matches Found: ${matches.length}</span></pre>
+                </div>
+                <div style="margin-bottom: 10px; color: #888; font-size: 12px;">
+                    Click on any match to expand and view full packet data
+                </div>
+            `;
+
+            matches.slice(0, 20).forEach((match, i) => {
+                const highlightedSnippet = match.snippet.replace(
+                    new RegExp(`(${searchTerm})`, 'gi'),
+                    '<span class="match">$1</span>'
+                );
+
+                const packet = match.packet;
+                const hexDump = formatHexDump(packet.data);
+                const asciiDump = formatAsciiDump(packet.data);
+
+                html += `
+                    <div class="match-item" onclick="togglePacketData(${i})">
+                        <div class="match-header">Match ${i + 1}: Packet #${match.index}</div>
+                        <div class="match-details">
+                            ${match.source} → ${match.dest} (${match.protocol}) |
+                            Length: ${packet.length} bytes |
+                            Timestamp: ${packet.timestamp.toFixed(6)}s
+                            ${packet.srcPort ? ` | Port ${packet.srcPort} → ${packet.dstPort}` : ''}
+                        </div>
+                        <div class="match-snippet">
+                            <strong>Match Position:</strong> ${match.position}<br>
+                            <strong>Snippet:</strong> ...${highlightedSnippet}...
+                        </div>
+                        <div class="expand-hint">▼ Click to expand packet data</div>
+
+                        <div class="packet-data" id="packet-data-${i}">
+                            <div class="packet-data-title">Hex Dump (${packet.data.length} bytes)</div>
+                            <div class="hex-dump">${hexDump}</div>
+
+                            <div class="packet-data-title" style="margin-top: 15px;">ASCII Representation</div>
+                            <div class="ascii-dump">${asciiDump}</div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            if (matches.length > 20) {
+                html += `<div style="color: #888; margin-top: 10px; font-size: 12px;">
+                    Showing first 20 of ${matches.length} matches
+                </div>`;
+            }
+
+            results.innerHTML = html;
+        }
+
+        // Auto-load on page load
+        window.onload = () => {
+            loadData();
+        };
+    </script>
+</body>
+</html>
