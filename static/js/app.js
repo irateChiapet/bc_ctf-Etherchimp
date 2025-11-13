@@ -3915,6 +3915,256 @@
                 }
             });
 
+            // Waterfall packet list toggle (live mode only)
+            const waterfallIcon = document.getElementById('waterfallIcon');
+            const waterfallPanel = document.getElementById('waterfallPanel');
+            const waterfallHeader = document.getElementById('waterfallHeader');
+            const waterfallClose = document.getElementById('waterfallClose');
+            const waterfallList = document.getElementById('waterfallList');
+            const waterfallSearch = document.getElementById('waterfallSearch');
+            const waterfallSearchStats = document.getElementById('waterfallSearchStats');
+
+            // Make waterfall panel draggable
+            let isDragging = false;
+            let dragOffsetX = 0;
+            let dragOffsetY = 0;
+
+            waterfallHeader.addEventListener('mousedown', (e) => {
+                // Don't drag if clicking the close button
+                if (e.target === waterfallClose) return;
+
+                isDragging = true;
+                dragOffsetX = e.clientX - waterfallPanel.offsetLeft;
+                dragOffsetY = e.clientY - waterfallPanel.offsetTop;
+                waterfallPanel.style.transition = 'none';
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+
+                const newLeft = e.clientX - dragOffsetX;
+                const newTop = e.clientY - dragOffsetY;
+
+                // Keep panel within viewport bounds
+                const maxLeft = window.innerWidth - waterfallPanel.offsetWidth;
+                const maxTop = window.innerHeight - waterfallPanel.offsetHeight;
+
+                waterfallPanel.style.left = Math.max(0, Math.min(newLeft, maxLeft)) + 'px';
+                waterfallPanel.style.top = Math.max(0, Math.min(newTop, maxTop)) + 'px';
+                waterfallPanel.style.right = 'auto';
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isDragging) {
+                    isDragging = false;
+                    waterfallPanel.style.transition = 'opacity 0.3s';
+                }
+            });
+
+            waterfallIcon.addEventListener('click', () => {
+                waterfallPanel.classList.toggle('active');
+                waterfallIcon.classList.toggle('active');
+                if (waterfallPanel.classList.contains('active')) {
+                    populateWaterfallList();
+                }
+            });
+
+            waterfallClose.addEventListener('click', (e) => {
+                e.stopPropagation();
+                waterfallPanel.classList.remove('active');
+                waterfallIcon.classList.remove('active');
+            });
+
+            // Packet detail panel
+            const packetDetailPanel = document.getElementById('packetDetailPanel');
+            const packetDetailClose = document.getElementById('packetDetailClose');
+
+            packetDetailClose.addEventListener('click', () => {
+                packetDetailPanel.classList.remove('active');
+            });
+
+            // Advanced waterfall search using the same search engine
+            let waterfallSearchTimeout;
+            waterfallSearch.addEventListener('input', (e) => {
+                clearTimeout(waterfallSearchTimeout);
+                waterfallSearchTimeout = setTimeout(() => {
+                    performWaterfallSearch(e.target.value.trim());
+                }, 300);
+            });
+
+            // Function to perform advanced waterfall search
+            function performWaterfallSearch(searchTerm) {
+                if (!searchTerm) {
+                    // No search term, show all packets
+                    populateWaterfallList();
+                    waterfallSearchStats.classList.remove('active');
+                    return;
+                }
+
+                // Use the advanced search from search-handler.js
+                const searchData = getSearchResults(searchTerm);
+                const results = searchData.results;
+                const stats = searchData.stats;
+
+                // Show search statistics
+                waterfallSearchStats.classList.add('active');
+                waterfallSearchStats.innerHTML = `
+                    <strong>Search Results:</strong> ${stats.totalMatches} matches found<br>
+                    Metadata matches: ${stats.metadataMatches} | Payload matches: ${stats.payloadMatches} | Total packets: ${stats.totalPackets.toLocaleString()}
+                `;
+
+                // Filter and display matching packets
+                waterfallList.innerHTML = '';
+
+                if (results.length === 0) {
+                    waterfallList.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">No packets found matching your search.</div>';
+                    return;
+                }
+
+                // Only show packet results, not host results
+                const packetResults = results.filter(r => r.type === 'packet');
+                const packets = visualizer.allPackets;
+
+                packetResults.forEach((result) => {
+                    const packet = result.data;
+                    const packetIndex = packets.indexOf(packet);
+                    const packetNum = packetIndex + 1;
+
+                    const packetItem = document.createElement('div');
+                    packetItem.className = 'packet-item';
+
+                    // Format timestamp
+                    const date = new Date(packet.timestamp * 1000);
+                    const timeStr = date.toLocaleTimeString('en-US', { hour12: false });
+
+                    packetItem.innerHTML = `
+                        <span class="packet-item-num">#${packetNum}</span>
+                        <span class="packet-item-time">${timeStr}</span>
+                        <span class="packet-item-src" title="${packet.source}">${packet.source}</span>
+                        <span>→</span>
+                        <span class="packet-item-dst" title="${packet.destination}">${packet.destination}</span>
+                        <span class="packet-item-protocol">${packet.protocol}</span>
+                        <span class="packet-item-len">${packet.length}B</span>
+                    `;
+
+                    // Add match detail as tooltip or subtitle
+                    if (result.detail) {
+                        packetItem.title = result.detail;
+                    }
+
+                    packetItem.addEventListener('click', () => {
+                        showPacketDetail(packet, packetNum);
+                    });
+
+                    waterfallList.appendChild(packetItem);
+                });
+            }
+
+            // Function to populate waterfall list with all packets
+            function populateWaterfallList() {
+                if (!visualizer || !visualizer.allPackets) return;
+
+                waterfallList.innerHTML = '';
+                waterfallSearchStats.classList.remove('active');
+                const packets = visualizer.allPackets;
+
+                // Show most recent 500 packets to avoid performance issues
+                const displayPackets = packets.slice(-500);
+                const startIndex = Math.max(0, packets.length - 500);
+
+                displayPackets.forEach((packet, index) => {
+                    const packetNum = startIndex + index + 1;
+                    const packetItem = document.createElement('div');
+                    packetItem.className = 'packet-item';
+
+                    // Format timestamp
+                    const date = new Date(packet.timestamp * 1000);
+                    const timeStr = date.toLocaleTimeString('en-US', { hour12: false });
+
+                    packetItem.innerHTML = `
+                        <span class="packet-item-num">#${packetNum}</span>
+                        <span class="packet-item-time">${timeStr}</span>
+                        <span class="packet-item-src" title="${packet.source}">${packet.source}</span>
+                        <span>→</span>
+                        <span class="packet-item-dst" title="${packet.destination}">${packet.destination}</span>
+                        <span class="packet-item-protocol">${packet.protocol}</span>
+                        <span class="packet-item-len">${packet.length}B</span>
+                    `;
+
+                    packetItem.addEventListener('click', () => {
+                        showPacketDetail(packet, packetNum);
+                    });
+
+                    waterfallList.appendChild(packetItem);
+                });
+
+                // Scroll to bottom to show latest packets
+                waterfallList.scrollTop = waterfallList.scrollHeight;
+            }
+
+            // Function to show packet detail in Wireshark style
+            function showPacketDetail(packet, packetNum) {
+                const packetDetailInfo = document.getElementById('packetDetailInfo');
+                const hexViewContent = document.getElementById('hexViewContent');
+                const asciiViewContent = document.getElementById('asciiViewContent');
+
+                // Format packet info
+                const date = new Date(packet.timestamp * 1000);
+                const timeStr = date.toLocaleString('en-US');
+
+                packetDetailInfo.innerHTML = `
+                    Packet #${packetNum} | Time: ${timeStr}<br>
+                    ${packet.source}:${packet.srcPort || ''} → ${packet.destination}:${packet.dstPort || ''}<br>
+                    Protocol: ${packet.protocol} | Length: ${packet.length} bytes
+                `;
+
+                // Format hex and ASCII views
+                const data = packet.data || [];
+                let hexLines = '';
+                let asciiLines = '';
+
+                // Process data in 16-byte rows (like Wireshark)
+                for (let i = 0; i < data.length; i += 16) {
+                    // Offset
+                    const offset = i.toString(16).padStart(4, '0');
+
+                    // Hex bytes
+                    let hexRow = offset + '  ';
+                    let asciiRow = '';
+
+                    for (let j = 0; j < 16; j++) {
+                        if (i + j < data.length) {
+                            const byte = data[i + j];
+                            hexRow += byte.toString(16).padStart(2, '0') + ' ';
+
+                            // ASCII representation (printable chars only)
+                            if (byte >= 32 && byte <= 126) {
+                                asciiRow += String.fromCharCode(byte);
+                            } else {
+                                asciiRow += '.';
+                            }
+                        } else {
+                            hexRow += '   ';
+                            asciiRow += ' ';
+                        }
+
+                        // Add extra space in the middle
+                        if (j === 7) {
+                            hexRow += ' ';
+                        }
+                    }
+
+                    hexLines += hexRow + '\n';
+                    asciiLines += offset + '  ' + asciiRow + '\n';
+                }
+
+                hexViewContent.textContent = hexLines;
+                asciiViewContent.textContent = asciiLines;
+
+                // Show the panel
+                packetDetailPanel.classList.add('active');
+            }
+
             // Close menus when clicking outside
             document.addEventListener('click', (e) => {
                 if (!searchIcon.contains(e.target) && !searchContainer.contains(e.target)) {
@@ -3928,6 +4178,13 @@
                 }
                 if (!legendIcon.contains(e.target) && !protocolLegend.contains(e.target)) {
                     protocolLegend.classList.remove('active');
+                }
+                if (!waterfallIcon.contains(e.target) && !waterfallPanel.contains(e.target) && !isDragging) {
+                    waterfallPanel.classList.remove('active');
+                    waterfallIcon.classList.remove('active');
+                }
+                if (!packetDetailPanel.contains(e.target)) {
+                    packetDetailPanel.classList.remove('active');
                 }
                 if (!alertsIcon.contains(e.target) && !alertsPanel.contains(e.target) && !alertsHeaderBtn.contains(e.target)) {
                     if (alertsPanel.classList.contains('active')) {
@@ -4337,6 +4594,9 @@
                 // Show save capture button
                 document.getElementById('saveCaptureBtn').style.display = 'block';
 
+                // Show waterfall icon in live mode
+                document.getElementById('waterfallIcon').style.display = 'flex';
+
                 // Initialize visualizer if not already created
                 if (!visualizer) {
                     console.log('[Frontend] Creating new NetworkVisualizer');
@@ -4372,6 +4632,11 @@
 
                 // Hide save capture button
                 document.getElementById('saveCaptureBtn').style.display = 'none';
+
+                // Hide waterfall icon
+                document.getElementById('waterfallIcon').style.display = 'none';
+                waterfallPanel.classList.remove('active');
+                waterfallIcon.classList.remove('active');
 
                 // Disable live mode aging/fading
                 if (visualizer) {
@@ -4437,6 +4702,9 @@
 
                     // Show save capture button
                     document.getElementById('saveCaptureBtn').style.display = 'block';
+
+                    // Show waterfall icon in live mode
+                    document.getElementById('waterfallIcon').style.display = 'flex';
 
                     // Initialize visualizer if needed
                     if (!visualizer) {
@@ -4612,6 +4880,14 @@
                             host.connections = nodeData.connections;
                         }
                     });
+                }
+
+                // Update parser.summary with backend statistics (including threat count from frontend)
+                if (data.statistics) {
+                    parser.summary = {
+                        ...data.statistics,
+                        threatsFound: parser.alerts.length  // Use frontend threat count
+                    };
                 }
 
                 console.log(`[Frontend] Visualizer state: ${visualizer.nodes.size} nodes, ${visualizer.edges.length} edges`);

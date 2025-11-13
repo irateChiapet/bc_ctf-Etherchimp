@@ -29,6 +29,10 @@ class LiveCapture:
         self.all_packets = []  # Store all captured packets for PCAP export
         self.batch_interval = 2  # Send batches every 2 seconds
         self.last_batch_time = time.time()
+        self.total_bytes = 0  # Track total bytes processed
+        self.start_time = None  # Track capture start time
+        self.first_packet_time = None  # Track first packet timestamp
+        self.last_packet_time = None  # Track last packet timestamp
 
         # Backend aggregation for nodes and edges
         self.nodes = {}  # IP -> node data
@@ -57,6 +61,10 @@ class LiveCapture:
         self.dns_cache = {}
         self.dns_lookup_queue = []
         self.last_batch_time = time.time()
+        self.total_bytes = 0
+        self.start_time = time.time()
+        self.first_packet_time = None
+        self.last_packet_time = None
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
 
@@ -117,9 +125,30 @@ class LiveCapture:
                 macs_found = sum(1 for n in nodes_serializable if n.get('mac'))
                 print(f"[LiveCapture] Sending {len(nodes_serializable)} nodes, {macs_found} with MAC addresses")
 
-                # Calculate statistics
+                # Calculate complete statistics
                 unique_hosts = len(self.nodes)
                 active_connections = len(self.edges)
+
+                # Calculate data volume in MB
+                data_volume_mb = round(self.total_bytes / 1048576, 2)
+
+                # Calculate average packet size
+                avg_packet_size = round(self.total_bytes / self.packet_count) if self.packet_count > 0 else 0
+
+                # Count unique protocols
+                all_protocols = set()
+                for node in self.nodes.values():
+                    all_protocols.update(node['protocols'])
+                protocol_count = len(all_protocols)
+
+                # Calculate packets per second and bandwidth
+                if self.first_packet_time and self.last_packet_time:
+                    duration = max(self.last_packet_time - self.first_packet_time, 0.001)  # Avoid division by zero
+                    packets_per_sec = round(self.packet_count / duration)
+                    bandwidth_mbps = round((self.total_bytes * 8 / duration) / 1000000, 2)
+                else:
+                    packets_per_sec = 0
+                    bandwidth_mbps = 0.0
 
                 # Send aggregated data to frontend
                 batch_data = {
@@ -134,7 +163,13 @@ class LiveCapture:
                         'activeConnections': active_connections,
                         'totalPackets': self.packet_count,
                         'totalNodes': unique_hosts,
-                        'totalEdges': active_connections
+                        'totalEdges': active_connections,
+                        'dataVolumeMB': data_volume_mb,
+                        'avgPacketSize': avg_packet_size,
+                        'protocolCount': protocol_count,
+                        'packetsPerSec': packets_per_sec,
+                        'bandwidthMbps': bandwidth_mbps,
+                        'threatsFound': 0  # Threats are tracked on frontend
                     }
                 }
                 print(f"[LiveCapture] Sending batch: {len(packets_to_send)} packets, {unique_hosts} unique hosts, {active_connections} active connections, {self.packet_count} total packets")
@@ -279,7 +314,14 @@ class LiveCapture:
             if len(self.packet_buffer) < 1000:  # Hard limit on buffer
                 self.packet_buffer.append(packet_data)
 
+            # Track statistics
             self.packet_count += 1
+            self.total_bytes += packet_data['length']
+
+            # Track packet timestamps
+            if self.first_packet_time is None:
+                self.first_packet_time = packet_data['timestamp']
+            self.last_packet_time = packet_data['timestamp']
 
             # Log every 100 packets
             if self.packet_count % 100 == 0:

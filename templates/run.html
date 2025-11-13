@@ -144,6 +144,8 @@
 
             <div class="rider-icon" id="riderIcon">🐵</div>
 
+            <div class="waterfall-icon" id="waterfallIcon">💧</div>
+
             <div class="protocol-legend" id="protocolLegend">
                 <div class="legend-title">Protocol Colors</div>
                 <div class="legend-item" data-protocol="HTTP">
@@ -189,6 +191,46 @@
                 <div class="legend-item" data-protocol="Other">
                     <div class="legend-color" style="background: #ffffff;"></div>
                     <span>Other</span>
+                </div>
+            </div>
+
+            <!-- Waterfall Packet List Panel -->
+            <div class="waterfall-panel" id="waterfallPanel">
+                <div class="waterfall-header" id="waterfallHeader">
+                    <div class="waterfall-title">Packet Capture - Live Stream</div>
+                    <div class="waterfall-close" id="waterfallClose">×</div>
+                </div>
+                <div class="waterfall-search">
+                    <input type="text" id="waterfallSearch" placeholder="Search: IP, hostname, protocol, port, hex (e.g., ff aa bb), or text in payload...">
+                    <div class="waterfall-search-stats" id="waterfallSearchStats"></div>
+                </div>
+                <div class="waterfall-list" id="waterfallList">
+                    <!-- Packets will be populated here -->
+                </div>
+            </div>
+
+            <!-- Packet Detail Panel (Wireshark-style) -->
+            <div class="packet-detail-panel" id="packetDetailPanel">
+                <div class="packet-detail-header">
+                    <div class="packet-detail-title">Packet Details</div>
+                    <div class="packet-detail-close" id="packetDetailClose">×</div>
+                </div>
+                <div class="packet-detail-info" id="packetDetailInfo">
+                    <!-- Packet summary info -->
+                </div>
+                <div class="packet-detail-viewer">
+                    <div class="packet-hex-view">
+                        <div class="hex-view-header">HEX</div>
+                        <div class="hex-view-content" id="hexViewContent">
+                            <!-- Hex data -->
+                        </div>
+                    </div>
+                    <div class="packet-ascii-view">
+                        <div class="ascii-view-header">ASCII</div>
+                        <div class="ascii-view-content" id="asciiViewContent">
+                            <!-- ASCII data -->
+                        </div>
+                    </div>
                 </div>
             </div>
 
