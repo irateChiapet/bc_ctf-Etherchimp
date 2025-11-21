@@ -1,0 +1,40 @@
+# Python virtual environment
+bin/
+lib/
+lib64
+include/
+share/
+pyvenv.cfg
+
+# Git
+.git/
+.gitignore
+
+# Uploads directory (will be created in container)
+uploads/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+
+# Logs
+*.log
+/tmp/
+
+# Test files
+debug_search.html
+test_search.html
+
+# Documentation (if not needed in container)
+*.md
