@@ -210,9 +210,10 @@ class LiveCapture:
                     self.dns_cache[ip] = None
 
     def _save_pcap(self):
-        """Save captured packets to PCAP file."""
+        """Save captured packets to PCAP file with rotation (keep only 3 most recent)."""
         if len(self.all_packets) > 0:
             import os
+            import glob
             timestamp = int(time.time())
             filename = f"live_capture_{timestamp}.pcap"
             filepath = os.path.join(self.upload_folder, filename)
@@ -220,8 +221,45 @@ class LiveCapture:
                 wrpcap(filepath, self.all_packets)
                 print(f"Saved {len(self.all_packets)} packets to {filepath}")
                 self.socketio.emit('pcap_saved', {'filename': filename, 'packet_count': len(self.all_packets)})
+
+                # Rotate old live_capture files (keep only 3 most recent)
+                self._rotate_live_captures()
             except Exception as e:
                 print(f"Error saving PCAP: {e}")
+
+    def _rotate_live_captures(self, keep_count=3):
+        """Keep only the most recent live_capture files, delete older ones."""
+        import os
+        import glob
+
+        try:
+            # Find all live_capture files
+            pattern = os.path.join(self.upload_folder, "live_capture_*.pcap")
+            live_capture_files = glob.glob(pattern)
+
+            if len(live_capture_files) <= keep_count:
+                return  # Nothing to rotate
+
+            # Sort by modification time (newest first)
+            live_capture_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+
+            # Keep only the most recent files
+            files_to_keep = live_capture_files[:keep_count]
+            files_to_delete = live_capture_files[keep_count:]
+
+            # Delete old files
+            for filepath in files_to_delete:
+                try:
+                    os.remove(filepath)
+                    filename = os.path.basename(filepath)
+                    print(f"[Rotation] Deleted old capture: {filename}")
+                except Exception as e:
+                    print(f"[Rotation] Error deleting {filepath}: {e}")
+
+            if files_to_delete:
+                print(f"[Rotation] Kept {len(files_to_keep)} most recent live captures, deleted {len(files_to_delete)} old files")
+        except Exception as e:
+            print(f"[Rotation] Error during rotation: {e}")
 
     def _process_packet(self, pkt):
         """Process a single captured packet."""

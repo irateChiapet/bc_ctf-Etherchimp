@@ -3293,31 +3293,107 @@
             window.visualizer = visualizer;  // Expose to global scope
             timeline = new TimelineController();
             
-            // File upload handling
+            // File upload handling (only if upload mode is enabled)
             const uploadArea = document.getElementById('uploadArea');
             const fileInput = document.getElementById('fileInput');
-            
-            uploadArea.addEventListener('click', () => fileInput.click());
-            
-            uploadArea.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                uploadArea.classList.add('dragover');
-            });
-            
-            uploadArea.addEventListener('dragleave', () => {
-                uploadArea.classList.remove('dragover');
-            });
-            
-            uploadArea.addEventListener('drop', (e) => {
-                e.preventDefault();
-                uploadArea.classList.remove('dragover');
-                handleFile(e.dataTransfer.files[0]);
-            });
-            
-            fileInput.addEventListener('change', (e) => {
-                handleFile(e.target.files[0]);
-            });
-            
+
+            if (uploadArea && fileInput) {
+                uploadArea.addEventListener('click', () => fileInput.click());
+
+                uploadArea.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    uploadArea.classList.add('dragover');
+                });
+
+                uploadArea.addEventListener('dragleave', () => {
+                    uploadArea.classList.remove('dragover');
+                });
+
+                uploadArea.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    uploadArea.classList.remove('dragover');
+                    handleFile(e.dataTransfer.files[0]);
+                });
+
+                fileInput.addEventListener('change', (e) => {
+                    handleFile(e.target.files[0]);
+                });
+            }
+
+            // Download mode handling
+            const downloadArea = document.getElementById('downloadArea');
+            const downloadList = document.getElementById('downloadList');
+            const refreshPcapsBtn = document.getElementById('refreshPcapsBtn');
+
+            if (downloadArea && downloadList && refreshPcapsBtn) {
+                // Function to fetch and display PCAP files
+                async function loadPcapFiles() {
+                    downloadList.innerHTML = '<div class="download-loading">Loading files...</div>';
+
+                    try {
+                        const response = await fetch('/list-pcaps');
+                        const data = await response.json();
+
+                        if (data.error) {
+                            downloadList.innerHTML = `<div class="download-empty">${data.error}</div>`;
+                            return;
+                        }
+
+                        if (!data.files || data.files.length === 0) {
+                            downloadList.innerHTML = '<div class="download-empty">No PCAP files available<br>Start a capture to create files</div>';
+                            return;
+                        }
+
+                        // Display files
+                        downloadList.innerHTML = '';
+                        data.files.forEach(file => {
+                            const item = document.createElement('div');
+                            item.className = 'download-item';
+
+                            // Format file size
+                            const sizeKB = (file.size / 1024).toFixed(2);
+                            const sizeMB = (file.size / 1048576).toFixed(2);
+                            const sizeStr = file.size < 1048576 ? `${sizeKB} KB` : `${sizeMB} MB`;
+
+                            // Format date
+                            const date = new Date(file.modified * 1000);
+                            const dateStr = date.toLocaleString();
+
+                            item.innerHTML = `
+                                <div class="download-item-name">📄 ${file.filename}</div>
+                                <div class="download-item-info">
+                                    <span class="download-item-size">${sizeStr}</span>
+                                    <span class="download-item-date">${dateStr}</span>
+                                </div>
+                            `;
+
+                            // Click to download
+                            item.addEventListener('click', () => {
+                                const downloadUrl = `/download/${encodeURIComponent(file.filename)}`;
+                                const link = document.createElement('a');
+                                link.href = downloadUrl;
+                                link.download = file.filename;
+                                link.click();
+                            });
+
+                            downloadList.appendChild(item);
+                        });
+                    } catch (error) {
+                        console.error('Error loading PCAP files:', error);
+                        downloadList.innerHTML = '<div class="download-empty">Error loading files<br>Please try again</div>';
+                    }
+                }
+
+                // Load files on page load
+                loadPcapFiles();
+
+                // Refresh button
+                refreshPcapsBtn.addEventListener('click', loadPcapFiles);
+
+                // Auto-refresh every 10 seconds
+                setInterval(loadPcapFiles, 10000);
+            }
+
             // Control buttons
             document.getElementById('playBtn').addEventListener('click', () => {
                 const isPlaying = timeline.togglePlay();

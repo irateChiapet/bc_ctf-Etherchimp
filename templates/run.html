@@ -17,12 +17,28 @@
             </div>
             
             <div class="upload-section">
+                {% if no_upload %}
+                <!-- Download Mode -->
+                <div class="download-area" id="downloadArea">
+                    <div class="download-header">
+                        <div class="download-icon">📥</div>
+                        <div class="download-text">Download PCAP Files</div>
+                        <div class="download-subtext">Available captured files</div>
+                    </div>
+                    <button class="refresh-btn" id="refreshPcapsBtn">🔄 Refresh</button>
+                    <div class="download-list" id="downloadList">
+                        <div class="download-loading">Loading files...</div>
+                    </div>
+                </div>
+                {% else %}
+                <!-- Upload Mode -->
                 <div class="upload-area" id="uploadArea">
                     <div class="upload-icon">📄</div>
                     <div class="upload-text">Drop PCAP file here or click to browse</div>
                     <div class="upload-subtext">Supports .pcap and .pcapng formats</div>
                 </div>
                 <input type="file" id="fileInput" accept=".pcap,.pcapng">
+                {% endif %}
             </div>
             
             <div class="stats-container">
@@ -312,7 +328,7 @@
     </div>
 
         <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-        <script src="/static/js/modules/search-handler.js?v=3.0"></script>
-        <script src="/static/js/app.js?v=3.0"></script>
+        <script src="/static/js/modules/search-handler.js?v=3.2"></script>
+        <script src="/static/js/app.js?v=3.2"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 """Flask routes for the PCAP Analyzer API."""
 
 import os
-from flask import request, jsonify, render_template
+from flask import request, jsonify, render_template, send_file, abort
 from werkzeug.utils import secure_filename
 from backend.processing.pcap_processor import process_pcap
 from backend.processing.live_capture import LiveCapture
@@ -18,7 +18,8 @@ def register_routes(app, socketio=None):
     def index():
         """Serves the main HTML file."""
         autoload_file = app.config.get('AUTOLOAD_FILE', None)
-        return render_template('run.html', autoload_file=autoload_file)
+        no_upload = app.config.get('NO_UPLOAD', False)
+        return render_template('run.html', autoload_file=autoload_file, no_upload=no_upload)
 
     @app.route('/test-search')
     def test_search():
@@ -52,6 +53,10 @@ def register_routes(app, socketio=None):
     @app.route('/upload', methods=['POST'])
     def upload_file():
         """Handles PCAP file upload and processing."""
+        # Check if upload is disabled
+        if app.config.get('NO_UPLOAD', False):
+            return jsonify({'error': 'Upload is disabled. Use --no-upload flag to enable download mode.'}), 403
+
         if 'file' not in request.files:
             return jsonify({'error': 'No file part'}), 400
         file = request.files['file']
@@ -75,6 +80,80 @@ def register_routes(app, socketio=None):
                 return jsonify(data), 500
 
             return jsonify(data)
+
+    @app.route('/list-pcaps', methods=['GET'])
+    def list_pcaps():
+        """List available PCAP files for download (only when --no-upload is enabled)."""
+        # Check if no-upload mode is enabled
+        if not app.config.get('NO_UPLOAD', False):
+            return jsonify({'error': 'Download mode is not enabled. Use --no-upload flag to enable.'}), 403
+
+        try:
+            upload_folder = app.config['UPLOAD_FOLDER']
+            # List only .pcap and .pcapng files
+            pcap_files = []
+            for filename in os.listdir(upload_folder):
+                if filename.endswith('.pcap') or filename.endswith('.pcapng'):
+                    filepath = os.path.join(upload_folder, filename)
+                    # Get file stats
+                    stats = os.stat(filepath)
+                    pcap_files.append({
+                        'filename': filename,
+                        'size': stats.st_size,
+                        'modified': stats.st_mtime
+                    })
+
+            # Sort by modification time (newest first)
+            pcap_files.sort(key=lambda x: x['modified'], reverse=True)
+
+            return jsonify({'files': pcap_files})
+        except Exception as e:
+            return jsonify({'error': f'Failed to list PCAP files: {str(e)}'}), 500
+
+    @app.route('/download/<filename>', methods=['GET'])
+    def download_pcap(filename):
+        """Download a PCAP file (only when --no-upload is enabled)."""
+        # Check if no-upload mode is enabled
+        if not app.config.get('NO_UPLOAD', False):
+            return jsonify({'error': 'Download mode is not enabled. Use --no-upload flag to enable.'}), 403
+
+        try:
+            # Security: Use secure_filename to prevent path traversal attacks
+            safe_filename = secure_filename(filename)
+
+            # Security: Verify the filename hasn't been modified (no path traversal)
+            if safe_filename != filename:
+                return jsonify({'error': 'Invalid filename. Path traversal detected.'}), 400
+
+            # Security: Only allow .pcap and .pcapng files
+            if not (safe_filename.endswith('.pcap') or safe_filename.endswith('.pcapng')):
+                return jsonify({'error': 'Only PCAP files (.pcap, .pcapng) can be downloaded.'}), 400
+
+            # Security: Construct the full path and verify it's within upload folder
+            upload_folder = os.path.abspath(app.config['UPLOAD_FOLDER'])
+            requested_path = os.path.abspath(os.path.join(upload_folder, safe_filename))
+
+            # Security: Verify the resolved path is still within the upload folder
+            if not requested_path.startswith(upload_folder + os.sep):
+                return jsonify({'error': 'Invalid file path. Access denied.'}), 403
+
+            # Security: Verify file exists
+            if not os.path.exists(requested_path):
+                return jsonify({'error': 'File not found.'}), 404
+
+            # Security: Verify it's a file (not a directory or symlink)
+            if not os.path.isfile(requested_path):
+                return jsonify({'error': 'Invalid file type.'}), 400
+
+            # Send file as attachment
+            return send_file(
+                requested_path,
+                as_attachment=True,
+                download_name=safe_filename,
+                mimetype='application/vnd.tcpdump.pcap'
+            )
+        except Exception as e:
+            return jsonify({'error': f'Failed to download file: {str(e)}'}), 500
 
     # SocketIO event handlers for live capture
     if socketio:

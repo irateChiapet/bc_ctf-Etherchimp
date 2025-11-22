@@ -207,6 +207,7 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--no-dns', action='store_true', help='Disable DNS name resolution for all capture modes')
     parser.add_argument('--ipv4-only', action='store_true', help='Show only IPv4 addresses (hide IPv6)')
     parser.add_argument('--private-only', action='store_true', help='Show only private/LAN addresses (hide public IPs)')
+    parser.add_argument('--no-upload', action='store_true', help='Disable upload and enable download of captured PCAP files')
     parser.add_argument('-p', '--port', type=int, default=5001, help='Port to run server on (default: 5001)')
     args = parser.parse_args()
 
@@ -281,6 +282,11 @@ if __name__ == '__main__':
         print("IPv4-only mode enabled (IPv6 addresses will be hidden)")
     if args.private_only:
         print("Private-only mode enabled (Public IP addresses will be hidden)")
+
+    # Set no-upload mode
+    app.config['NO_UPLOAD'] = args.no_upload
+    if args.no_upload:
+        print("Upload disabled - Download mode enabled for captured PCAP files")
 
     # If an interface is specified, set up live capture
     if args.interface:

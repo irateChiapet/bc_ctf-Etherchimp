@@ -233,6 +233,166 @@
             display: none;
         }
 
+        /* Download Mode Styles */
+        .download-area {
+            border: 2px solid #0099ff;
+            border-radius: 12px;
+            padding: 16px;
+            background: rgba(0, 150, 255, 0.05);
+        }
+
+        body.dark-mode .download-area {
+            border: 2px solid #0099ff;
+            background: rgba(0, 150, 255, 0.08);
+        }
+
+        .download-header {
+            text-align: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(0, 153, 255, 0.2);
+        }
+
+        .download-icon {
+            font-size: 36px;
+            margin-bottom: 8px;
+        }
+
+        .download-text {
+            color: #333;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        body.dark-mode .download-text {
+            color: #fff;
+        }
+
+        .download-subtext {
+            color: #666;
+            font-size: 9px;
+        }
+
+        body.dark-mode .download-subtext {
+            color: #999;
+        }
+
+        .refresh-btn {
+            width: 100%;
+            padding: 10px;
+            background: linear-gradient(135deg, #0099ff 0%, #0066cc 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 12px;
+        }
+
+        .refresh-btn:hover {
+            background: linear-gradient(135deg, #00aaff 0%, #0077dd 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 153, 255, 0.3);
+        }
+
+        .refresh-btn:active {
+            transform: translateY(0);
+        }
+
+        .download-list {
+            max-height: 300px;
+            overflow-y: auto;
+            border-radius: 8px;
+        }
+
+        .download-loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 10px;
+        }
+
+        body.dark-mode .download-loading {
+            color: #999;
+        }
+
+        .download-item {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        body.dark-mode .download-item {
+            background: #1a1a1a;
+            border: 1px solid #333;
+        }
+
+        .download-item:hover {
+            background: #f0f8ff;
+            border-color: #0099ff;
+            transform: translateX(4px);
+            box-shadow: 0 2px 8px rgba(0, 153, 255, 0.2);
+        }
+
+        body.dark-mode .download-item:hover {
+            background: #222;
+            border-color: #0099ff;
+            box-shadow: 0 2px 8px rgba(0, 153, 255, 0.3);
+        }
+
+        .download-item-name {
+            font-size: 11px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+            word-break: break-all;
+        }
+
+        body.dark-mode .download-item-name {
+            color: #fff;
+        }
+
+        .download-item-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 9px;
+            color: #666;
+        }
+
+        body.dark-mode .download-item-info {
+            color: #999;
+        }
+
+        .download-item-size {
+            color: #0099ff;
+        }
+
+        .download-item-date {
+            color: #999;
+        }
+
+        body.dark-mode .download-item-date {
+            color: #666;
+        }
+
+        .download-empty {
+            text-align: center;
+            padding: 30px;
+            color: #999;
+            font-size: 10px;
+        }
+
+        body.dark-mode .download-empty {
+            color: #666;
+        }
+
         .stats-container {
             flex: 1;
             overflow-y: auto;
