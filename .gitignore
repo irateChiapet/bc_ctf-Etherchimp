@@ -6,4 +6,5 @@ share
 include
 *.pcap
 *.md
-
+dist
+build
