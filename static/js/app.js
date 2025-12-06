@@ -1081,6 +1081,84 @@
                 dashboard.classList.add('active');
             }
 
+            calculateHeaderSize(packetData) {
+                /**
+                 * Dynamically calculate header size for a packet
+                 * Returns offset where payload begins
+                 */
+                if (!packetData || packetData.length < 14) {
+                    return packetData ? packetData.length : 0;  // Too small, no payload
+                }
+
+                let offset = 0;
+
+                // Ethernet header (14 bytes) - check for 0x0800 (IPv4) or 0x86DD (IPv6)
+                const etherType = (packetData[12] << 8) | packetData[13];
+
+                if (etherType === 0x0800) {
+                    // IPv4 packet
+                    offset = 14;  // Skip Ethernet header
+
+                    if (packetData.length < offset + 20) {
+                        return packetData.length;  // Incomplete IP header
+                    }
+
+                    // IPv4 header length is in the first nibble of byte 14 (in 32-bit words)
+                    const ipHeaderLength = (packetData[offset] & 0x0F) * 4;
+                    offset += ipHeaderLength;
+
+                    if (packetData.length <= offset) {
+                        return packetData.length;  // No transport layer
+                    }
+
+                    // Check protocol (TCP=6, UDP=17)
+                    const protocol = packetData[14 + 9];  // Protocol is at byte 9 of IP header
+
+                    if (protocol === 6) {
+                        // TCP - header length in data offset field (bits 0-3 of byte 12, in 32-bit words)
+                        if (packetData.length < offset + 13) {
+                            return packetData.length;
+                        }
+                        const tcpHeaderLength = ((packetData[offset + 12] >> 4) & 0x0F) * 4;
+                        offset += tcpHeaderLength;
+                    } else if (protocol === 17) {
+                        // UDP - fixed 8 byte header
+                        offset += 8;
+                    } else {
+                        // Other protocols - assume no additional header
+                    }
+
+                } else if (etherType === 0x86DD) {
+                    // IPv6 packet
+                    offset = 14;  // Skip Ethernet header
+                    offset += 40;  // IPv6 header is fixed 40 bytes
+
+                    if (packetData.length <= offset) {
+                        return packetData.length;
+                    }
+
+                    // Check next header (TCP=6, UDP=17)
+                    const nextHeader = packetData[14 + 6];  // Next header is at byte 6 of IPv6 header
+
+                    if (nextHeader === 6) {
+                        // TCP
+                        if (packetData.length < offset + 13) {
+                            return packetData.length;
+                        }
+                        const tcpHeaderLength = ((packetData[offset + 12] >> 4) & 0x0F) * 4;
+                        offset += tcpHeaderLength;
+                    } else if (nextHeader === 17) {
+                        // UDP
+                        offset += 8;
+                    }
+                } else {
+                    // Non-IP packet or unknown EtherType, use default offset
+                    offset = 14;
+                }
+
+                return Math.min(offset, packetData.length);
+            }
+
             showEdgePackets(edge) {
                 const dashboard = document.getElementById('nodeDashboard');
                 const title = document.getElementById('dashboardTitle');
@@ -1155,8 +1233,8 @@
 
                         edgePackets.forEach((packet) => {
                             if (packet.data && packet.data.length > 0) {
-                                // Extract payload (skip headers - typically first 54 bytes for TCP/IP)
-                                const headerSize = 54;
+                                // Calculate dynamic header size based on actual packet structure
+                                const headerSize = this.calculateHeaderSize(packet.data);
                                 const payloadData = packet.data.slice(headerSize);
 
                                 // Only include packets with actual payload
@@ -4748,11 +4826,13 @@
                 console.log(`[Frontend] PCAP saved: ${data.filename} (${data.packet_count} packets)`);
             });
 
-            // Packet processing with limits
-            const MAX_PACKETS_STORED = 10000; // Limit stored packets to prevent memory issues
+            // Packet processing with limits (increased for better completeness)
+            const MAX_PACKETS_STORED = 20000; // Limit stored packets to prevent memory issues (increased from 10000)
             const MAX_NODES = 500; // Limit nodes to prevent performance degradation
+            const MAX_PACKETS_PER_EDGE = 500; // Increased from 100
             let lastUIUpdate = 0;
             let updateScheduled = false;
+            let lastDropWarning = 0;
 
             function scheduleUIUpdate() {
                 if (updateScheduled) return;
@@ -4872,7 +4952,24 @@
                 }
 
                 // Process packets for threat detection and packet details
-                data.packets.forEach((packet) => {
+                data.packets.forEach((packet, idx) => {
+                    // Validate and sanitize packet.data to ensure it's an array of numbers
+                    if (packet.data && !Array.isArray(packet.data)) {
+                        console.error('[Frontend] packet.data is not an array:', typeof packet.data, packet.data);
+                        packet.data = [];
+                    } else if (packet.data && Array.isArray(packet.data)) {
+                        // Validate first element to ensure array contains numbers
+                        if (idx === 0 && packet.data.length > 0 && typeof packet.data[0] !== 'number') {
+                            console.error('[Frontend] packet.data contains non-numeric values:', typeof packet.data[0], packet.data[0]);
+                        }
+                        // Sanitize: ensure all elements are numbers
+                        packet.data = packet.data.map(b => {
+                            if (typeof b === 'number') return b;
+                            if (typeof b === 'string') return parseInt(b, 10) || 0;
+                            return 0;
+                        });
+                    }
+
                     parser.packets.push(packet);
 
                     // Add to visualizer's allPackets for stream/packet detail views
@@ -4894,8 +4991,8 @@
                         if (edge) {
                             if (!edge.packets) edge.packets = [];
                             edge.packets.push(packet);
-                            // Limit packets per edge
-                            if (edge.packets.length > 100) {
+                            // Limit packets per edge (increased from 100 to 500)
+                            if (edge.packets.length > MAX_PACKETS_PER_EDGE) {
                                 edge.packets.shift();
                             }
                         }
@@ -4909,7 +5006,7 @@
                         if (srcNode) {
                             if (!srcNode.packets) srcNode.packets = [];
                             srcNode.packets.push(packet);
-                            if (srcNode.packets.length > 100) {
+                            if (srcNode.packets.length > MAX_PACKETS_PER_EDGE) {
                                 srcNode.packets.shift();
                             }
                         }
@@ -4917,7 +5014,7 @@
                         if (dstNode) {
                             if (!dstNode.packets) dstNode.packets = [];
                             dstNode.packets.push(packet);
-                            if (dstNode.packets.length > 100) {
+                            if (dstNode.packets.length > MAX_PACKETS_PER_EDGE) {
                                 dstNode.packets.shift();
                             }
                         }
@@ -4956,6 +5053,16 @@
                             host.connections = nodeData.connections;
                         }
                     });
+                }
+
+                // Check for dropped packets and warn user
+                if (data.statistics && data.statistics.packetsDropped > 0) {
+                    const now = Date.now();
+                    // Only warn once every 10 seconds to avoid spam
+                    if (now - lastDropWarning > 10000) {
+                        console.warn(`[Frontend] WARNING: Backend has dropped ${data.statistics.packetsDropped} packets. Buffer size: ${data.statistics.bufferSize}. Consider stopping other traffic or saving capture.`);
+                        lastDropWarning = now;
+                    }
                 }
 
                 // Update parser.summary with backend statistics (including threat count from frontend)

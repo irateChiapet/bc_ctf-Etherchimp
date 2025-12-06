@@ -48,7 +48,11 @@ class RemoteCapture:
         # Backend aggregation for nodes and edges
         self.nodes = {}
         self.edges = {}
-        self.max_packets_per_batch = 100
+        self.max_packets_per_batch = 500  # Increased from 100
+        self.max_buffer_size = 5000  # Maximum buffer size before dropping packets
+
+        # Packet loss tracking
+        self.packets_dropped = 0
 
         # DNS resolution cache
         self.dns_cache = {}
@@ -68,6 +72,7 @@ class RemoteCapture:
         self.dns_cache = {}
         self.dns_lookup_queue = []
         self.last_batch_time = time.time()
+        self.packets_dropped = 0
 
         # Start capture thread
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -219,7 +224,9 @@ class RemoteCapture:
                         'activeConnections': active_connections,
                         'totalPackets': self.packet_count,
                         'totalNodes': unique_hosts,
-                        'totalEdges': active_connections
+                        'totalEdges': active_connections,
+                        'packetsDropped': self.packets_dropped,
+                        'bufferSize': len(self.packet_buffer)
                     }
                 }
                 print(f"[RemoteCapture] Sending batch: {len(packets_to_send)} packets, {unique_hosts} unique hosts, {active_connections} active connections, {self.packet_count} total packets")
@@ -387,8 +394,13 @@ class RemoteCapture:
                 self.edges[existing_key]['bytes'] += packet_data['length']
 
             # Add to buffer
-            if len(self.packet_buffer) < 1000:
+            if len(self.packet_buffer) < self.max_buffer_size:
                 self.packet_buffer.append(packet_data)
+            else:
+                # Track dropped packets
+                self.packets_dropped += 1
+                if self.packets_dropped % 100 == 1:  # Log every 100 drops
+                    print(f"[RemoteCapture] WARNING: Dropped {self.packets_dropped} packets due to buffer overflow. Consider reducing traffic or increasing batch interval.")
 
             self.packet_count += 1
 

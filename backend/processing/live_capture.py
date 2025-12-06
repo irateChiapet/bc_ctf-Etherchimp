@@ -37,7 +37,11 @@ class LiveCapture:
         # Backend aggregation for nodes and edges
         self.nodes = {}  # IP -> node data
         self.edges = {}  # (src, dst) -> edge data
-        self.max_packets_per_batch = 100  # Limit packets sent per batch
+        self.max_packets_per_batch = 500  # Limit packets sent per batch (increased from 100)
+        self.max_buffer_size = 5000  # Maximum buffer size before dropping packets (increased from 1000)
+
+        # Packet loss tracking
+        self.packets_dropped = 0
 
         # MAC address tracking
         self.ip_to_mac = {}  # IP -> MAC address mapping
@@ -65,6 +69,7 @@ class LiveCapture:
         self.start_time = time.time()
         self.first_packet_time = None
         self.last_packet_time = None
+        self.packets_dropped = 0
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
 
@@ -169,6 +174,8 @@ class LiveCapture:
                         'protocolCount': protocol_count,
                         'packetsPerSec': packets_per_sec,
                         'bandwidthMbps': bandwidth_mbps,
+                        'packetsDropped': self.packets_dropped,
+                        'bufferSize': len(self.packet_buffer),
                         'threatsFound': 0  # Threats are tracked on frontend
                     }
                 }
@@ -349,8 +356,13 @@ class LiveCapture:
                 self.edges[existing_key]['bytes'] += packet_data['length']
 
             # Add to buffer for batch sending (limit buffer size)
-            if len(self.packet_buffer) < 1000:  # Hard limit on buffer
+            if len(self.packet_buffer) < self.max_buffer_size:
                 self.packet_buffer.append(packet_data)
+            else:
+                # Track dropped packets
+                self.packets_dropped += 1
+                if self.packets_dropped % 100 == 1:  # Log every 100 drops
+                    print(f"[LiveCapture] WARNING: Dropped {self.packets_dropped} packets due to buffer overflow. Consider reducing traffic or increasing batch interval.")
 
             # Track statistics
             self.packet_count += 1
