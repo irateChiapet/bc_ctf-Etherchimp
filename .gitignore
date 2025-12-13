@@ -8,3 +8,5 @@ include
 *.md
 dist
 build
+*.key
+*.crt
