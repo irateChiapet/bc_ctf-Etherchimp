@@ -622,9 +622,11 @@ function setupSearch() {
         searchInput.focus();
     });
 
-    // Close results when clicking outside
+    // Close results and clear input when clicking outside
     document.addEventListener('click', function(e) {
         if (!e.target.closest('.search-container')) {
+            searchInput.value = '';
+            searchClear.style.display = 'none';
             searchResults.classList.remove('show');
         }
     });
@@ -940,11 +942,24 @@ function displaySearchResults(results, query) {
             ? `data-packet-ids="${result.packetIds.join(',')}"`
             : '';
 
+        // Check if the first matching packet is part of a stream
+        let streamIdAttr = '';
+        let streamsTag = '';
+        if (result.packetIds && result.packetIds.length > 0) {
+            const firstPacket = packetCache.get(result.packetIds[0]);
+            if (firstPacket && firstPacket.srcPort && firstPacket.dstPort && isStreamProtocol(firstPacket.protocol)) {
+                const streamId = generateStreamId(firstPacket.src, firstPacket.srcPort, firstPacket.dst, firstPacket.dstPort, firstPacket.protocol);
+                streamIdAttr = `data-stream-id="${streamId}"`;
+                streamsTag = '<span class="search-result-tag search-stream-tag" style="background: rgba(155, 89, 182, 0.3); cursor: pointer;">Streams</span>';
+            }
+        }
+
         return `
-            <div class="search-result-item" data-node-id="${result.nodeId}" ${packetIdsAttr}>
+            <div class="search-result-item" data-node-id="${result.nodeId}" ${packetIdsAttr} ${streamIdAttr}>
                 <div class="search-result-title">
                     ${highlightMatch(result.label, query)}
                     ${result.packetIds && result.packetIds.length > 0 ? '<span class="search-result-tag" style="background: rgba(52, 152, 219, 0.3);">Packets</span>' : ''}
+                    ${streamsTag}
                 </div>
                 <div class="search-result-subtitle">
                     <span class="search-result-tag">IP: ${highlightMatch(result.ip, query)}</span>
@@ -958,7 +973,29 @@ function displaySearchResults(results, query) {
     searchResults.innerHTML = html;
     searchResults.classList.add('show');
 
-    // Add click handlers
+    // Helper to clear search
+    const clearSearch = () => {
+        const searchInput = document.getElementById('searchInput');
+        const searchClear = document.getElementById('searchClear');
+        searchInput.value = '';
+        searchClear.style.display = 'none';
+        searchResults.classList.remove('show');
+    };
+
+    // Add click handlers for Streams tags
+    searchResults.querySelectorAll('.search-stream-tag').forEach(tag => {
+        tag.addEventListener('click', function(event) {
+            event.stopPropagation(); // Prevent parent item click
+            const item = this.closest('.search-result-item');
+            const streamId = item.getAttribute('data-stream-id');
+            if (streamId) {
+                openStreamDetail(streamId);
+                clearSearch();
+            }
+        });
+    });
+
+    // Add click handlers for result items
     searchResults.querySelectorAll('.search-result-item').forEach(item => {
         item.addEventListener('click', function() {
             const nodeId = this.getAttribute('data-node-id');
@@ -987,8 +1024,7 @@ function displaySearchResults(results, query) {
             // Also focus on the node in the graph
             focusOnNode(nodeId);
 
-            // Close search results
-            searchResults.classList.remove('show');
+            clearSearch();
         });
     });
 }
@@ -3015,6 +3051,31 @@ function formatDuration(seconds) {
 // Streams state
 let currentStreamData = null;
 let currentStreamTab = 'decoded';
+
+// Generate stream ID from packet data (matches backend logic)
+function generateStreamId(srcIP, srcPort, dstIP, dstPort, protocol) {
+    // Determine stream type based on protocol
+    let streamType = 'TCP';
+    if (protocol === 'UDP' || protocol === 'DNS') {
+        streamType = 'UDP';
+    }
+
+    // Normalize direction (lower IP:port first)
+    let src = `${srcIP}:${srcPort}`;
+    let dst = `${dstIP}:${dstPort}`;
+
+    if (src > dst) {
+        [src, dst] = [dst, src];
+    }
+
+    return `${streamType}-${src}-${dst}`;
+}
+
+// Check if a protocol is stream-capable (TCP or UDP based)
+function isStreamProtocol(protocol) {
+    const streamProtocols = ['TCP', 'UDP', 'HTTP', 'HTTPS', 'DNS', 'SSH', 'FTP', 'SMTP', 'MySQL', 'PostgreSQL', 'Telnet', 'Redis', 'Slurm'];
+    return streamProtocols.includes(protocol);
+}
 
 // Setup streams functionality
 function setupStreams() {
