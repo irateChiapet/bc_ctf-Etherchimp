@@ -1678,3 +1678,351 @@ body.light-theme .chimpy-hex-dump {
 .main-content.timeline-visible {
     padding-bottom: 20px;
 }
+
+/* ==================== Stream Styles ==================== */
+
+/* Streams Controls */
+.streams-controls {
+    padding: 8px 0;
+}
+
+.streams-filter {
+    margin-bottom: 10px;
+}
+
+.stream-filter-select {
+    width: 100%;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-dropdown);
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.stream-filter-select:hover {
+    border-color: var(--accent-primary);
+}
+
+.stream-filter-select:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+}
+
+.streams-stats {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    background: var(--bg-dropdown);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.stream-stat {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.stream-stat span {
+    color: var(--accent-primary);
+    font-weight: 600;
+}
+
+/* Streams List */
+.streams-list {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-dropdown);
+}
+
+.stream-item {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.stream-item:last-child {
+    border-bottom: none;
+}
+
+.stream-item:hover {
+    background: rgba(52, 152, 219, 0.1);
+}
+
+.stream-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.stream-protocol {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+}
+
+.stream-protocol.http { background: #3498db; color: white; }
+.stream-protocol.https { background: #2ecc71; color: white; }
+.stream-protocol.dns { background: #9b59b6; color: white; }
+.stream-protocol.ssh { background: #e74c3c; color: white; }
+.stream-protocol.smtp { background: #f39c12; color: white; }
+.stream-protocol.ftp { background: #1abc9c; color: white; }
+.stream-protocol.mysql { background: #e67e22; color: white; }
+.stream-protocol.postgresql { background: #336791; color: white; }
+.stream-protocol.redis { background: #dc382d; color: white; }
+.stream-protocol.slurm { background: #ff7f50; color: white; }
+.stream-protocol.unknown { background: #7f8c8d; color: white; }
+
+.stream-type {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.stream-endpoints {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.stream-summary {
+    font-size: 11px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.stream-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* Stream Detail Panel */
+.stream-detail-panel {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80%;
+    max-width: 1000px;
+    height: 80%;
+    max-height: 700px;
+    background: var(--bg-panel);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px var(--shadow-color);
+    z-index: 1001;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.stream-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-dropdown);
+}
+
+.stream-detail-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.stream-detail-title h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.stream-protocol-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    background: var(--accent-primary);
+    color: white;
+}
+
+.stream-detail-close {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.stream-detail-close:hover {
+    background: rgba(231, 76, 60, 0.1);
+    color: var(--accent-danger);
+}
+
+.stream-detail-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-dropdown);
+}
+
+.stream-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.stream-meta-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+}
+
+.stream-meta-value {
+    font-size: 13px;
+    color: var(--text-primary);
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.stream-detail-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.stream-tab {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.stream-tab:hover {
+    background: var(--bg-dropdown);
+    color: var(--text-primary);
+}
+
+.stream-tab.active {
+    background: var(--accent-primary);
+    color: white;
+}
+
+.stream-detail-content {
+    flex: 1;
+    overflow: auto;
+    padding: 16px 20px;
+}
+
+.stream-content-pre {
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-primary);
+    background: var(--bg-graph);
+    padding: 16px;
+    border-radius: 8px;
+    min-height: 100%;
+    margin: 0;
+}
+
+/* Stream packets list */
+.stream-packets-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.stream-packet-item {
+    padding: 10px 12px;
+    background: var(--bg-dropdown);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-primary);
+}
+
+.stream-packet-item.response {
+    border-left-color: var(--accent-success);
+}
+
+.stream-packet-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.stream-packet-direction {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--accent-primary);
+    color: white;
+}
+
+.stream-packet-item.response .stream-packet-direction {
+    background: var(--accent-success);
+}
+
+.stream-packet-time {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.stream-packet-data {
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Empty streams message */
+.streams-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+/* Modal backdrop for stream detail */
+.stream-detail-panel ~ .modal-backdrop {
+    z-index: 1000;
+}

@@ -99,13 +99,29 @@ func (m *Manager) AddOrUpdateNode(ip, hostname string, bytes int) {
 				// Merge stats into existing node
 				m.nodes[nodeID].PacketCount += oldNode.PacketCount
 				m.nodes[nodeID].ByteCount += oldNode.ByteCount
-				m.nodes[nodeID].IPs = append(m.nodes[nodeID].IPs, oldNode.IPs...)
+				// Merge IPs, avoiding duplicates
+				for _, oldIP := range oldNode.IPs {
+					found := false
+					for _, existingIP := range m.nodes[nodeID].IPs {
+						if existingIP == oldIP {
+							found = true
+							break
+						}
+					}
+					if !found {
+						m.nodes[nodeID].IPs = append(m.nodes[nodeID].IPs, oldIP)
+					}
+				}
 			}
 			// Delete old node
 			delete(m.nodes, existingNodeID)
 		}
 
 		// Update all edges that used the old node ID
+		// Collect edges to update/merge to avoid modifying map during iteration
+		edgesToDelete := make([]string, 0)
+		edgesToAdd := make(map[string]*Edge)
+
 		for edgeID, edge := range m.edges {
 			updated := false
 			if edge.From == existingNodeID {
@@ -117,14 +133,48 @@ func (m *Manager) AddOrUpdateNode(ip, hostname string, bytes int) {
 				updated = true
 			}
 			if updated {
-				// Update edge ID
+				// Calculate new edge ID
 				newEdgeID := edge.From + "->" + edge.To
+
+				// Skip self-loops that might be created by merging
+				if edge.From == edge.To {
+					edgesToDelete = append(edgesToDelete, edgeID)
+					continue
+				}
+
 				if newEdgeID != edgeID {
-					delete(m.edges, edgeID)
-					m.edges[newEdgeID] = edge
-					edge.ID = newEdgeID
+					edgesToDelete = append(edgesToDelete, edgeID)
+
+					// Check if an edge with the new ID already exists
+					if existingEdge, exists := m.edges[newEdgeID]; exists {
+						// Merge edge stats
+						existingEdge.PacketCount += edge.PacketCount
+						existingEdge.ByteCount += edge.ByteCount
+						if edge.LastSeen.After(existingEdge.LastSeen) {
+							existingEdge.LastSeen = edge.LastSeen
+						}
+					} else if pendingEdge, exists := edgesToAdd[newEdgeID]; exists {
+						// Merge with pending edge
+						pendingEdge.PacketCount += edge.PacketCount
+						pendingEdge.ByteCount += edge.ByteCount
+						if edge.LastSeen.After(pendingEdge.LastSeen) {
+							pendingEdge.LastSeen = edge.LastSeen
+						}
+					} else {
+						// Add as new edge
+						edge.ID = newEdgeID
+						edgesToAdd[newEdgeID] = edge
+					}
 				}
 			}
+		}
+
+		// Apply edge changes
+		for _, edgeID := range edgesToDelete {
+			delete(m.edges, edgeID)
+		}
+		for edgeID, edge := range edgesToAdd {
+			m.edges[edgeID] = edge
 		}
 	}
 
@@ -246,12 +296,31 @@ func (m *Manager) RemoveStaleNodes(threshold time.Duration) int {
 	now := time.Now()
 	removed := 0
 
-	// Remove stale nodes
-	for ip, node := range m.nodes {
+	// Collect stale node IDs first to avoid modifying map during iteration
+	staleNodeIDs := make([]string, 0)
+	for nodeID, node := range m.nodes {
 		if now.Sub(node.LastSeen) > threshold {
-			delete(m.nodes, ip)
-			removed++
+			staleNodeIDs = append(staleNodeIDs, nodeID)
 		}
+	}
+
+	// Remove stale nodes and clean up mappings
+	for _, nodeID := range staleNodeIDs {
+		node := m.nodes[nodeID]
+		if node != nil {
+			// Remove all IP mappings for this node
+			for _, ip := range node.IPs {
+				delete(m.ipToNodeID, ip)
+			}
+			// Remove hostname mapping if it exists
+			if node.Hostname != "" && node.Hostname != nodeID {
+				delete(m.hostnameToNodeID, node.Hostname)
+			}
+			// Also check if nodeID itself is a hostname
+			delete(m.hostnameToNodeID, nodeID)
+		}
+		delete(m.nodes, nodeID)
+		removed++
 	}
 
 	return removed
@@ -263,17 +332,21 @@ func (m *Manager) RemoveStaleEdges(threshold time.Duration) int {
 	defer m.mu.Unlock()
 
 	now := time.Now()
-	removed := 0
 
-	// Remove stale edges
+	// Collect stale edge IDs first to avoid modifying map during iteration
+	staleEdgeIDs := make([]string, 0)
 	for id, edge := range m.edges {
 		if now.Sub(edge.LastSeen) > threshold {
-			delete(m.edges, id)
-			removed++
+			staleEdgeIDs = append(staleEdgeIDs, id)
 		}
 	}
 
-	return removed
+	// Remove stale edges
+	for _, id := range staleEdgeIDs {
+		delete(m.edges, id)
+	}
+
+	return len(staleEdgeIDs)
 }
 
 // GetNodeCount returns the current number of nodes

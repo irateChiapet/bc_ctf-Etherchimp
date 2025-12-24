@@ -11,6 +11,8 @@ const PROTOCOL_COLORS = {
     'SMTP': '#8b4513',
     'MySQL': '#34495e',
     'PostgreSQL': '#16a085',
+    'InfluxDB': '#22ADF6',
+    'Slurm': '#ff7f50',
     'ARP': '#95a5a6',
     'IPv6': '#7f8c8d',
     'Other': '#ecf0f1'
@@ -60,7 +62,95 @@ function init() {
     setupClusterLayout();
     setupChimpyMode();
     setupReplayMode();
+    setupStreams();
     connectWebSocket();
+}
+
+// Performance tier thresholds
+const PERF_TIER_LOW = 30;      // Below this: full quality
+const PERF_TIER_MEDIUM = 100;  // Below this: reduced quality
+const PERF_TIER_HIGH = 300;    // Below this: performance mode
+const PERF_TIER_EXTREME = 500; // Above this: maximum performance
+
+// Get performance tier based on node count
+function getPerformanceTier(nodeCount) {
+    if (nodeCount <= PERF_TIER_LOW) return 'low';
+    if (nodeCount <= PERF_TIER_MEDIUM) return 'medium';
+    if (nodeCount <= PERF_TIER_HIGH) return 'high';
+    if (nodeCount <= PERF_TIER_EXTREME) return 'extreme';
+    return 'maximum';
+}
+
+// Get physics settings based on performance tier
+function getPhysicsSettings(tier) {
+    const settings = {
+        low: {
+            stabilization: { iterations: 150, updateInterval: 25 },
+            barnesHut: {
+                gravitationalConstant: -8000,
+                centralGravity: 0.3,
+                springLength: 150,
+                springConstant: 0.04,
+                damping: 0.09,
+                avoidOverlap: 0.5
+            },
+            timestep: 0.5,
+            minVelocity: 0.75
+        },
+        medium: {
+            stabilization: { iterations: 100, updateInterval: 50 },
+            barnesHut: {
+                gravitationalConstant: -5000,
+                centralGravity: 0.3,
+                springLength: 120,
+                springConstant: 0.05,
+                damping: 0.15,
+                avoidOverlap: 0.3
+            },
+            timestep: 0.75,
+            minVelocity: 1.0
+        },
+        high: {
+            stabilization: { iterations: 50, updateInterval: 100 },
+            barnesHut: {
+                gravitationalConstant: -3000,
+                centralGravity: 0.5,
+                springLength: 100,
+                springConstant: 0.08,
+                damping: 0.3,
+                avoidOverlap: 0
+            },
+            timestep: 1.0,
+            minVelocity: 2.0
+        },
+        extreme: {
+            stabilization: { iterations: 30, updateInterval: 100 },
+            barnesHut: {
+                gravitationalConstant: -2000,
+                centralGravity: 0.8,
+                springLength: 80,
+                springConstant: 0.1,
+                damping: 0.5,
+                avoidOverlap: 0
+            },
+            timestep: 1.5,
+            minVelocity: 3.0
+        },
+        maximum: {
+            stabilization: { iterations: 15, updateInterval: 200 },
+            barnesHut: {
+                gravitationalConstant: -1000,
+                centralGravity: 1.0,
+                springLength: 60,
+                springConstant: 0.15,
+                damping: 0.7,
+                avoidOverlap: 0
+            },
+            timestep: 2.0,
+            minVelocity: 5.0
+        }
+    };
+    return settings[tier] || settings.medium;
 }
 
 // Get theme-aware network options
@@ -69,9 +159,14 @@ function getNetworkOptions() {
     const nodeCount = nodes.getIds().length;
 
     // Adaptive performance settings based on node count
-    const isHighLoad = nodeCount > 50;
-    const shadowsEnabled = !isHighLoad; // Disable shadows under high load
-    const smoothEdges = !isHighLoad; // Disable edge smoothing under high load
+    const tier = getPerformanceTier(nodeCount);
+    const physicsSettings = getPhysicsSettings(tier);
+
+    // Visual quality settings based on tier
+    const shadowsEnabled = tier === 'low';
+    const smoothEdges = tier === 'low' || tier === 'medium';
+    const hoverEnabled = tier !== 'maximum';
+    const hideLabelsOnZoom = tier === 'extreme' || tier === 'maximum';
 
     return {
         nodes: {
@@ -82,7 +177,7 @@ function getNetworkOptions() {
                 color: isLightTheme ? '#2c3e50' : '#ffffff',
                 face: 'monospace'
             },
-            borderWidth: 2,
+            borderWidth: tier === 'maximum' ? 1 : 2,
             borderWidthSelected: 4,
             color: {
                 border: isLightTheme ? '#7f8c8d' : '#2c3e50',
@@ -98,14 +193,21 @@ function getNetworkOptions() {
                 size: 10,
                 x: 5,
                 y: 5
+            },
+            scaling: {
+                label: {
+                    enabled: !hideLabelsOnZoom,
+                    min: hideLabelsOnZoom ? 0 : 10,
+                    max: 24
+                }
             }
         },
         edges: {
-            width: 2,
+            width: tier === 'maximum' ? 1 : 2,
             arrows: {
                 to: {
                     enabled: true,
-                    scaleFactor: 0.5
+                    scaleFactor: tier === 'maximum' ? 0.3 : 0.5
                 }
             },
             smooth: smoothEdges ? {
@@ -127,21 +229,12 @@ function getNetworkOptions() {
             }
         },
         physics: {
-            stabilization: {
-                iterations: isHighLoad ? 50 : 100,
-                updateInterval: isHighLoad ? 50 : 25
-            },
-            barnesHut: {
-                gravitationalConstant: -8000,
-                centralGravity: 0.3,
-                springLength: 150,
-                springConstant: 0.04,
-                damping: 0.09,
-                avoidOverlap: isHighLoad ? 0 : 0.5
-            },
+            stabilization: physicsSettings.stabilization,
+            barnesHut: physicsSettings.barnesHut,
             adaptiveTimestep: true,
-            timestep: isHighLoad ? 1.0 : 0.5,
-            minVelocity: isHighLoad ? 2.0 : 0.75
+            timestep: physicsSettings.timestep,
+            minVelocity: physicsSettings.minVelocity,
+            maxVelocity: tier === 'maximum' ? 30 : 50
         },
         interaction: {
             hover: true,
@@ -309,6 +402,22 @@ function setupDropdowns() {
         replayToggle.addEventListener('click', function(e) {
             e.stopPropagation();
             toggleSubmenu(replayToggle, replaySubmenu);
+        });
+    }
+
+    // Streams toggle
+    const streamsToggle = document.getElementById('streamsToggle');
+    const streamsSubmenu = document.getElementById('streamsSubmenu');
+
+    if (streamsToggle && streamsSubmenu) {
+        streamsToggle.addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleSubmenu(streamsToggle, streamsSubmenu);
+            // Load streams when opening - use saved protocol filter
+            if (streamsSubmenu.classList.contains('show')) {
+                const filter = document.getElementById('streamProtocolFilter');
+                loadStreams(filter?.value || '');
+            }
         });
     }
 
@@ -863,6 +972,8 @@ function displaySearchResults(results, query) {
                 const packetPanel = document.getElementById('packetPanel');
                 if (!packetPanel.classList.contains('show')) {
                     packetPanel.classList.add('show');
+                    // Load packets when opening panel via search
+                    loadPackets();
                 }
 
                 // Select the first matching packet
@@ -1646,6 +1757,12 @@ function updateGraph(data) {
             const toDelete = sortedIds.slice(0, packetCache.size - MAX_CACHED_PACKETS);
             toDelete.forEach(id => packetCache.delete(id));
         }
+
+        // Auto-refresh packet panel if it's visible
+        const packetPanel = document.getElementById('packetPanel');
+        if (packetPanel && packetPanel.classList.contains('show')) {
+            loadPackets();
+        }
     }
 
     // Calculate total collected packets from all nodes
@@ -1963,52 +2080,152 @@ function applyClusterLayout(layout) {
             return;
 
         case 'hierarchical':
-            // Use hierarchical layout
-            options.physics.enabled = false;
-            options.physics.stabilization = false;
+            // Hierarchical layout based on packet counts and communication patterns
+            const hierNodeIds = nodes.getIds();
+            const hierTier = getPerformanceTier(hierNodeIds.length);
+
+            // Calculate incoming and outgoing traffic for each node
+            const incomingTraffic = new Map();  // node -> total incoming packets
+            const outgoingTraffic = new Map();  // node -> total outgoing packets
+            const connections = new Map();       // node -> Set of nodes it talks to
+
+            // Initialize maps
+            hierNodeIds.forEach(id => {
+                incomingTraffic.set(id, 0);
+                outgoingTraffic.set(id, 0);
+                connections.set(id, new Set());
+            });
+
+            // Analyze edges to build traffic patterns
+            edges.get().forEach(edge => {
+                if (edge.hidden) return;
+                const packets = edge.packetCount || 1;
+
+                // Track outgoing from source
+                outgoingTraffic.set(edge.from, (outgoingTraffic.get(edge.from) || 0) + packets);
+
+                // Track incoming to destination
+                incomingTraffic.set(edge.to, (incomingTraffic.get(edge.to) || 0) + packets);
+
+                // Track connections
+                if (connections.has(edge.from)) {
+                    connections.get(edge.from).add(edge.to);
+                }
+            });
+
+            // Calculate hierarchy level for each node
+            // Level is based on: ratio of incoming to outgoing traffic
+            // High incoming (servers) = level 0 (top)
+            // High outgoing (clients) = higher level (bottom)
+            // Also consider total traffic volume for importance
+
+            const nodeLevels = new Map();
+            const nodeScores = [];
+
+            hierNodeIds.forEach(id => {
+                const incoming = incomingTraffic.get(id) || 0;
+                const outgoing = outgoingTraffic.get(id) || 0;
+                const total = incoming + outgoing;
+                const connectionCount = connections.get(id)?.size || 0;
+
+                // Calculate a score: higher = more "server-like" (receives more than sends)
+                // Score combines traffic ratio with total volume
+                let score = 0;
+                if (total > 0) {
+                    // Ratio component: incoming / total (0 to 1, higher = more incoming)
+                    const ratio = incoming / total;
+                    // Volume component: log scale of total traffic
+                    const volume = Math.log(total + 1);
+                    // Connection component: more connections = more central
+                    const connectivity = Math.log(connectionCount + 1);
+
+                    // Combined score (weighted)
+                    score = (ratio * 50) + (volume * 30) + (connectivity * 20);
+                }
+
+                nodeScores.push({ id, score, incoming, outgoing, total, connectionCount });
+            });
+
+            // Sort by score descending (highest score = top of hierarchy)
+            nodeScores.sort((a, b) => b.score - a.score);
+
+            // Assign levels based on score percentiles
+            // Top nodes get level 0, bottom nodes get higher levels
+            const numLevels = Math.min(Math.ceil(hierNodeIds.length / 5), 10); // Max 10 levels
+            const nodesPerLevel = Math.ceil(hierNodeIds.length / numLevels);
+
+            nodeScores.forEach((node, index) => {
+                const level = Math.floor(index / nodesPerLevel);
+                nodeLevels.set(node.id, level);
+            });
+
+            // Batch update nodes with their hierarchy levels
+            const hierUpdates = hierNodeIds.map(id => ({
+                id: id,
+                level: nodeLevels.get(id) || 0,
+                fixed: { x: false, y: false }
+            }));
+            nodes.update(hierUpdates);
+
+            // Configure hierarchical layout
+            options.physics.enabled = hierTier !== 'low'; // Use physics for fine-tuning except on small graphs
+            options.physics.hierarchicalRepulsion = {
+                centralGravity: 0.0,
+                springLength: 150,
+                springConstant: 0.01,
+                nodeDistance: 120,
+                damping: 0.09
+            };
+            options.physics.solver = 'hierarchicalRepulsion';
+            options.physics.stabilization = {
+                enabled: true,
+                iterations: hierTier === 'low' ? 100 : 50,
+                updateInterval: 50
+            };
             options.layout = {
-                improvedLayout: true,
+                improvedLayout: hierTier === 'low',
                 hierarchical: {
                     enabled: true,
-                    direction: 'UD',
+                    direction: 'UD',  // Up-Down: servers at top
                     sortMethod: 'directed',
-                    levelSeparation: 150,
-                    nodeSpacing: 200,
-                    treeSpacing: 200
+                    levelSeparation: 120,
+                    nodeSpacing: hierTier === 'maximum' ? 100 : 150,
+                    treeSpacing: hierTier === 'maximum' ? 150 : 200,
+                    shakeTowards: 'roots'  // Shake undefined nodes towards the roots (top)
                 }
             };
 
-            // Apply options first
+            // Apply options
             network.setOptions(options);
 
-            // Stop any ongoing simulation
-            network.stopSimulation();
+            // Stop any ongoing simulation after layout is computed
+            if (hierTier === 'low') {
+                network.stopSimulation();
+            } else {
+                // Let physics settle briefly then stop
+                setTimeout(() => {
+                    if (network) network.stopSimulation();
+                }, 2000);
+            }
 
             // Early return since we already called setOptions
             return;
 
         case 'gravity':
-            // Gravity-based clustering where high-traffic nodes attract others
-            options.physics.enabled = true;
-            options.physics.solver = 'barnesHut';
-            options.physics.barnesHut = {
-                gravitationalConstant: -2000,
-                centralGravity: 0.1,
-                springLength: 200,
-                springConstant: 0.001,
-                damping: 0.95,
-                avoidOverlap: 1
-            };
-            options.physics.stabilization = {
-                enabled: true,
-                iterations: 1000,
-                updateInterval: 25,
-                fit: true
-            };
+            // Clustered Host: Position nodes based on traffic patterns (no physics)
+            const gravityNodeIds = nodes.getIds();
+
+            // Disable physics for static layout
+            options.physics.enabled = false;
+            options.physics.stabilization = false;
             options.layout = {
-                improvedLayout: true,
+                improvedLayout: false,
                 hierarchical: false
             };
+
+            // Apply options first to disable physics
+            network.setOptions(options);
+            network.stopSimulation();
 
             // Calculate packet counts for each node
             const nodePacketCounts = new Map();
@@ -2022,62 +2239,84 @@ function applyClusterLayout(layout) {
                 }
             });
 
-            // Update nodes with mass based on packet count
-            const gravityNodeIds = nodes.getIds();
+            // Sort nodes by packet count (highest first)
             const maxPackets = Math.max(...Array.from(nodePacketCounts.values()), 1);
+            const sortedNodes = gravityNodeIds.map(id => ({
+                id,
+                packets: nodePacketCounts.get(id) || 0
+            })).sort((a, b) => b.packets - a.packets);
 
-            gravityNodeIds.forEach(id => {
-                const incomingPackets = nodePacketCounts.get(id) || 1;
-                // Higher packet count = higher mass = stronger gravitational pull
-                // Using logarithmic scale and normalizing to avoid extreme values
-                const normalizedPackets = incomingPackets / maxPackets;
-                const mass = 1 + (Math.log(incomingPackets + 1) * 2); // Range: 1 to ~15
+            // Position nodes in concentric circles based on traffic
+            // High-traffic nodes in center, low-traffic on outer rings
+            const centerX = 0;
+            const centerY = 0;
+            const minRadius = 50;
+            const radiusStep = 80;
 
-                nodes.update({
-                    id: id,
-                    fixed: { x: false, y: false },
-                    mass: mass,
-                    value: Math.log(incomingPackets + 1) * 5, // Also update visual size
-                    physics: true
-                });
+            // Group nodes into rings based on packet count percentiles
+            const numRings = Math.min(Math.ceil(sortedNodes.length / 8), 10);
+            const nodesPerRing = Math.ceil(sortedNodes.length / numRings);
+
+            const nodeUpdates = sortedNodes.map((node, index) => {
+                const ring = Math.floor(index / nodesPerRing);
+                const positionInRing = index % nodesPerRing;
+                const nodesInThisRing = Math.min(nodesPerRing, sortedNodes.length - ring * nodesPerRing);
+
+                const radius = minRadius + (ring * radiusStep);
+                const angle = (2 * Math.PI * positionInRing) / nodesInThisRing;
+
+                const x = centerX + radius * Math.cos(angle);
+                const y = centerY + radius * Math.sin(angle);
+
+                return {
+                    id: node.id,
+                    x: x,
+                    y: y,
+                    fixed: { x: true, y: true },
+                    value: Math.log(node.packets + 1) * 5
+                };
             });
-            break;
+
+            nodes.update(nodeUpdates);
+
+            // Fit view to show all nodes
+            setTimeout(() => {
+                if (network) network.fit({ animation: { duration: 500 } });
+            }, 100);
+
+            return;
 
         case 'subnet':
-            // Cluster nodes by subnet (group by IP network prefix)
-            options.physics.enabled = true;
-            options.physics.solver = 'barnesHut';
-            options.physics.barnesHut = {
-                gravitationalConstant: -1000,
-                centralGravity: 0.05,
-                springLength: 150,
-                springConstant: 0.01,
-                damping: 0.9,
-                avoidOverlap: 0.5
-            };
-            options.physics.stabilization = {
-                enabled: true,
-                iterations: 500,
-                updateInterval: 25,
-                fit: true
-            };
+            // Clustered Subnet: Group nodes by IP subnet (no physics)
+            const subnetNodeIds = nodes.getIds();
+
+            // Disable physics for static layout
+            options.physics.enabled = false;
+            options.physics.stabilization = false;
             options.layout = {
-                improvedLayout: true,
+                improvedLayout: false,
                 hierarchical: false
             };
 
+            // Apply options first to disable physics
+            network.setOptions(options);
+            network.stopSimulation();
+
             // Group nodes by subnet
             const subnetGroups = new Map();
-            const subnetNodeIds = nodes.getIds();
 
             subnetNodeIds.forEach(id => {
                 const node = nodes.get(id);
-                const label = node.label || '';
+                const label = node.label || id || '';
 
-                // Extract subnet from IP address (assumes /24 subnet)
-                // Match IPv4 address pattern
-                const ipMatch = label.match(/(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}/);
-                const subnet = ipMatch ? ipMatch[1] : 'unknown';
+                // Try to extract subnet from IP address (assumes /24 subnet)
+                // Check both label and id for IP patterns
+                let subnet = 'unknown';
+                const ipMatch = label.match(/(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}/) ||
+                               (id && id.match(/(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}/));
+                if (ipMatch) {
+                    subnet = ipMatch[1];
+                }
 
                 if (!subnetGroups.has(subnet)) {
                     subnetGroups.set(subnet, []);
@@ -2088,31 +2327,41 @@ function applyClusterLayout(layout) {
             // Position each subnet group in a different area
             const subnetCount = subnetGroups.size;
             const subnetsArray = Array.from(subnetGroups.entries());
-            const clusterRadius = 400; // Distance from center for each subnet cluster
 
-            subnetsArray.forEach(([subnet, nodeIds], index) => {
-                // Calculate position for this subnet's center
+            // Adjust cluster radius based on number of subnets
+            const clusterRadius = Math.max(300, subnetCount * 60);
+
+            // Batch all node updates for better performance
+            const subnetUpdates = [];
+            subnetsArray.forEach(([subnet, nodeIdsInSubnet], index) => {
                 const angle = (2 * Math.PI * index) / subnetCount;
-                const centerX = clusterRadius * Math.cos(angle);
-                const centerY = clusterRadius * Math.sin(angle);
+                const clusterCenterX = clusterRadius * Math.cos(angle);
+                const clusterCenterY = clusterRadius * Math.sin(angle);
 
-                // Position nodes within the subnet cluster
-                const subnetRadius = 100;
-                nodeIds.forEach((id, nodeIndex) => {
-                    const nodeAngle = (2 * Math.PI * nodeIndex) / nodeIds.length;
-                    const x = centerX + (subnetRadius * Math.cos(nodeAngle));
-                    const y = centerY + (subnetRadius * Math.sin(nodeAngle));
+                // Adjust subnet radius based on number of nodes in subnet
+                const subnetRadius = Math.max(50, Math.min(150, nodeIdsInSubnet.length * 15));
 
-                    nodes.update({
+                nodeIdsInSubnet.forEach((id, nodeIndex) => {
+                    const nodeAngle = (2 * Math.PI * nodeIndex) / nodeIdsInSubnet.length;
+                    const x = clusterCenterX + (subnetRadius * Math.cos(nodeAngle));
+                    const y = clusterCenterY + (subnetRadius * Math.sin(nodeAngle));
+
+                    subnetUpdates.push({
                         id: id,
                         x: x,
                         y: y,
-                        fixed: { x: false, y: false },
-                        physics: true
+                        fixed: { x: true, y: true }
                     });
                 });
             });
-            break;
+            nodes.update(subnetUpdates);
+
+            // Fit view to show all nodes
+            setTimeout(() => {
+                if (network) network.fit({ animation: { duration: 500 } });
+            }, 100);
+
+            return;
 
         case 'force':
         default:
@@ -2759,6 +3008,347 @@ function formatDuration(seconds) {
         const mins = Math.floor((seconds % 3600) / 60);
         return `${hours}h ${mins}m`;
     }
+}
+
+// ==================== Streams Functionality ====================
+
+// Streams state
+let currentStreamData = null;
+let currentStreamTab = 'decoded';
+
+// Setup streams functionality
+function setupStreams() {
+    const protocolFilter = document.getElementById('streamProtocolFilter');
+    const refreshButton = document.getElementById('refreshStreamsButton');
+    const detailClose = document.getElementById('streamDetailClose');
+
+    // Restore saved protocol filter from localStorage
+    if (protocolFilter) {
+        const savedProtocol = localStorage.getItem('streamProtocolFilter') || '';
+        protocolFilter.value = savedProtocol;
+    }
+
+    // Protocol filter change - save to localStorage
+    if (protocolFilter) {
+        protocolFilter.addEventListener('change', () => {
+            localStorage.setItem('streamProtocolFilter', protocolFilter.value);
+            loadStreams(protocolFilter.value);
+        });
+    }
+
+    // Refresh button
+    if (refreshButton) {
+        refreshButton.addEventListener('click', () => {
+            const filter = document.getElementById('streamProtocolFilter');
+            loadStreams(filter?.value || '');
+        });
+    }
+
+    // Stream detail close button
+    if (detailClose) {
+        detailClose.addEventListener('click', closeStreamDetail);
+    }
+
+    // Setup stream detail tabs
+    document.querySelectorAll('.stream-tab[data-stream-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabName = tab.dataset.streamTab;
+            switchStreamTab(tabName);
+        });
+    });
+}
+
+// Load streams from API
+async function loadStreams(protocol = '') {
+    const streamsList = document.getElementById('streamsList');
+    const streamCount = document.getElementById('streamCount');
+
+    if (!streamsList) return;
+
+    streamsList.innerHTML = '<div class="loading">Loading streams...</div>';
+
+    try {
+        let url = '/api/streams';
+        if (protocol) {
+            url += `?protocol=${encodeURIComponent(protocol)}`;
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error('Failed to load streams');
+        }
+
+        const streams = await response.json();
+
+        if (streamCount) {
+            streamCount.textContent = streams.length;
+        }
+
+        if (streams.length === 0) {
+            streamsList.innerHTML = '<div class="streams-empty">No streams captured yet</div>';
+            return;
+        }
+
+        streamsList.innerHTML = streams.map(stream => renderStreamItem(stream)).join('');
+
+        // Add click handlers
+        streamsList.querySelectorAll('.stream-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const streamId = item.dataset.streamId;
+                openStreamDetail(streamId);
+            });
+        });
+
+    } catch (error) {
+        console.error('Failed to load streams:', error);
+        streamsList.innerHTML = '<div class="streams-empty">Failed to load streams</div>';
+    }
+}
+
+// Render a stream item for the list
+function renderStreamItem(stream) {
+    const protocolClass = stream.protocol.toLowerCase().replace(/\s+/g, '');
+    const timeAgo = formatTimeAgo(new Date(stream.lastSeen));
+
+    return `
+        <div class="stream-item" data-stream-id="${escapeHtml(stream.id)}">
+            <div class="stream-item-header">
+                <span class="stream-protocol ${protocolClass}">${escapeHtml(stream.protocol)}</span>
+                <span class="stream-type">${escapeHtml(stream.type)}</span>
+            </div>
+            <div class="stream-endpoints">
+                ${escapeHtml(stream.srcIp)}:${stream.srcPort} → ${escapeHtml(stream.dstIp)}:${stream.dstPort}
+            </div>
+            <div class="stream-summary">${escapeHtml(stream.summary || 'No summary')}</div>
+            <div class="stream-meta">
+                <span>${stream.packetCount} packets</span>
+                <span>${formatBytes(stream.byteCount)}</span>
+                <span>${timeAgo}</span>
+            </div>
+        </div>
+    `;
+}
+
+// Open stream detail panel
+async function openStreamDetail(streamId) {
+    const panel = document.getElementById('streamDetailPanel');
+    const backdrop = document.getElementById('modalBackdrop');
+
+    if (!panel) return;
+
+    try {
+        const response = await fetch(`/api/stream?id=${encodeURIComponent(streamId)}`);
+        if (!response.ok) {
+            throw new Error('Failed to load stream details');
+        }
+
+        currentStreamData = await response.json();
+
+        // Update panel header
+        document.getElementById('streamDetailTitle').textContent =
+            `${currentStreamData.srcIp}:${currentStreamData.srcPort} → ${currentStreamData.dstIp}:${currentStreamData.dstPort}`;
+
+        const badge = document.getElementById('streamProtocolBadge');
+        badge.textContent = currentStreamData.protocol;
+        badge.className = 'stream-protocol-badge ' + currentStreamData.protocol.toLowerCase();
+
+        // Update metadata
+        const metaContainer = document.getElementById('streamDetailMeta');
+        metaContainer.innerHTML = `
+            <div class="stream-meta-item">
+                <span class="stream-meta-label">Type</span>
+                <span class="stream-meta-value">${escapeHtml(currentStreamData.type)}</span>
+            </div>
+            <div class="stream-meta-item">
+                <span class="stream-meta-label">Packets</span>
+                <span class="stream-meta-value">${currentStreamData.packetCount}</span>
+            </div>
+            <div class="stream-meta-item">
+                <span class="stream-meta-label">Bytes</span>
+                <span class="stream-meta-value">${formatBytes(currentStreamData.byteCount)}</span>
+            </div>
+            <div class="stream-meta-item">
+                <span class="stream-meta-label">Started</span>
+                <span class="stream-meta-value">${new Date(currentStreamData.startTime).toLocaleString()}</span>
+            </div>
+            <div class="stream-meta-item">
+                <span class="stream-meta-label">Last Seen</span>
+                <span class="stream-meta-value">${new Date(currentStreamData.lastSeen).toLocaleString()}</span>
+            </div>
+        `;
+
+        // Reset to decoded tab
+        currentStreamTab = 'decoded';
+        document.querySelectorAll('.stream-tab[data-stream-tab]').forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.streamTab === 'decoded');
+        });
+
+        // Render content
+        renderStreamContent();
+
+        // Show panel
+        panel.style.display = 'flex';
+        backdrop.style.display = 'block';
+
+    } catch (error) {
+        console.error('Failed to load stream details:', error);
+    }
+}
+
+// Close stream detail panel
+function closeStreamDetail() {
+    const panel = document.getElementById('streamDetailPanel');
+    const backdrop = document.getElementById('modalBackdrop');
+    const detailsPanel = document.getElementById('detailsPanel');
+
+    if (panel) {
+        panel.style.display = 'none';
+    }
+    // Only hide backdrop if details panel is also closed
+    if (backdrop && (!detailsPanel || !detailsPanel.classList.contains('open'))) {
+        backdrop.style.display = 'none';
+    }
+    currentStreamData = null;
+}
+
+// Switch stream detail tab
+function switchStreamTab(tabName) {
+    currentStreamTab = tabName;
+
+    document.querySelectorAll('.stream-tab[data-stream-tab]').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.streamTab === tabName);
+    });
+
+    renderStreamContent();
+}
+
+// Render stream content based on current tab
+function renderStreamContent() {
+    if (!currentStreamData) return;
+
+    const content = document.getElementById('streamContentPre');
+    if (!content) return;
+
+    switch (currentStreamTab) {
+        case 'decoded':
+            content.textContent = currentStreamData.decodedContent || 'No decoded content available';
+            break;
+
+        case 'raw':
+            // Show hex dump of request and response
+            let rawContent = '';
+            if (currentStreamData.requestPayload) {
+                rawContent += '=== REQUEST DATA ===\n';
+                rawContent += formatBase64AsHex(currentStreamData.requestPayload);
+            }
+            if (currentStreamData.responsePayload) {
+                rawContent += '\n=== RESPONSE DATA ===\n';
+                rawContent += formatBase64AsHex(currentStreamData.responsePayload);
+            }
+            content.textContent = rawContent || 'No raw data available';
+            break;
+
+        case 'packets':
+            // Render packets list
+            if (currentStreamData.packets && currentStreamData.packets.length > 0) {
+                const packetsHtml = currentStreamData.packets.map((pkt, idx) => {
+                    const direction = pkt.direction === 'request' ? 'Request' : 'Response';
+                    const time = new Date(pkt.timestamp).toLocaleTimeString();
+                    const dataPreview = pkt.payload ?
+                        truncateBase64(pkt.payload, 100) : '(empty)';
+
+                    return `[${idx + 1}] ${direction} - ${time} - ${pkt.length} bytes\n${dataPreview}\n`;
+                }).join('\n');
+                content.textContent = packetsHtml;
+            } else {
+                content.textContent = 'No packets recorded';
+            }
+            break;
+    }
+}
+
+// Format base64 data as hex dump
+function formatBase64AsHex(base64Data) {
+    try {
+        const binary = atob(base64Data);
+        let result = '';
+        const lineWidth = 16;
+
+        for (let i = 0; i < binary.length && i < 4096; i += lineWidth) {
+            // Offset
+            result += i.toString(16).padStart(8, '0') + '  ';
+
+            // Hex bytes
+            let hexPart = '';
+            let asciiPart = '';
+            for (let j = 0; j < lineWidth; j++) {
+                if (i + j < binary.length) {
+                    const byte = binary.charCodeAt(i + j);
+                    hexPart += byte.toString(16).padStart(2, '0') + ' ';
+                    asciiPart += (byte >= 32 && byte < 127) ? binary[i + j] : '.';
+                } else {
+                    hexPart += '   ';
+                }
+                if (j === 7) hexPart += ' ';
+            }
+
+            result += hexPart + ' |' + asciiPart + '|\n';
+        }
+
+        if (binary.length > 4096) {
+            result += `\n... (${binary.length - 4096} more bytes truncated)`;
+        }
+
+        return result;
+    } catch (e) {
+        return '(Unable to decode data)';
+    }
+}
+
+// Truncate base64 and show as ASCII
+function truncateBase64(base64Data, maxChars) {
+    try {
+        const binary = atob(base64Data);
+        let result = '';
+        for (let i = 0; i < binary.length && i < maxChars; i++) {
+            const byte = binary.charCodeAt(i);
+            result += (byte >= 32 && byte < 127) ? binary[i] : '.';
+        }
+        if (binary.length > maxChars) {
+            result += '...';
+        }
+        return result;
+    } catch (e) {
+        return '(Unable to decode)';
+    }
+}
+
+// Format time ago
+function formatTimeAgo(date) {
+    const now = new Date();
+    const diffMs = now - date;
+    const diffSec = Math.floor(diffMs / 1000);
+
+    if (diffSec < 60) return `${diffSec}s ago`;
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
+// Format bytes
+function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+// Escape HTML to prevent XSS
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML;
 }
 
 // Start the application when DOM is ready

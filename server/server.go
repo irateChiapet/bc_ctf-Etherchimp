@@ -16,31 +16,60 @@ import (
 	"time"
 
 	"go-etherape/graph"
+	"go-etherape/stream"
 )
 
 // Server manages the HTTPS server
 type Server struct {
-	addr     string
-	graphMgr *Manager
-	server   *http.Server
-	hub      *Hub
+	addr        string
+	graphMgr    *Manager
+	streamMgr   *stream.Manager
+	server      *http.Server
+	hub         *Hub
+	rateLimiter *RateLimiter
+}
+
+// ServerConfig holds server configuration options
+type ServerConfig struct {
+	BindIP          string
+	Port            int
+	RateLimitConfig RateLimitConfig
+	StreamMgr       *stream.Manager
+	ReplayOnlyMode  bool
+}
+
+// DefaultServerConfig returns sensible defaults
+func DefaultServerConfig(bindIP string, port int) ServerConfig {
+	return ServerConfig{
+		BindIP:          bindIP,
+		Port:            port,
+		RateLimitConfig: DefaultRateLimitConfig(),
+	}
 }
 
 // NewServer creates a new HTTPS server
 func NewServer(bindIP string, port int, graphMgr *graph.Manager) *Server {
-	addr := fmt.Sprintf("%s:%d", bindIP, port)
+	return NewServerWithConfig(DefaultServerConfig(bindIP, port), graphMgr)
+}
+
+// NewServerWithConfig creates a new HTTPS server with custom configuration
+func NewServerWithConfig(config ServerConfig, graphMgr *graph.Manager) *Server {
+	addr := fmt.Sprintf("%s:%d", config.BindIP, config.Port)
 	hub := NewHub(graphMgr)
 
 	return &Server{
-		addr:     addr,
-		graphMgr: &Manager{graphMgr: graphMgr},
-		hub:      hub,
+		addr:        addr,
+		graphMgr:    &Manager{graphMgr: graphMgr, streamMgr: config.StreamMgr},
+		streamMgr:   config.StreamMgr,
+		hub:         hub,
+		rateLimiter: NewRateLimiter(config.RateLimitConfig),
 	}
 }
 
-// Manager wraps the graph manager for server use
+// Manager wraps the graph and stream managers for server use
 type Manager struct {
-	graphMgr *graph.Manager
+	graphMgr  *graph.Manager
+	streamMgr *stream.Manager
 }
 
 // Start starts the HTTPS server
@@ -60,16 +89,21 @@ func (s *Server) Start() error {
 	// Start WebSocket hub
 	go s.hub.Run()
 
-	// Setup routes
+	// Setup routes with rate limiting on API endpoints
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.graphMgr.handleIndex)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		handleWebSocket(s.hub, w, r)
 	})
-	mux.HandleFunc("/api/graph", s.graphMgr.handleGraphAPI)
-	mux.HandleFunc("/api/pcaps", s.graphMgr.handleListPcaps)
-	mux.HandleFunc("/api/replay", s.graphMgr.handleReplayPcap)
-	mux.HandleFunc("/api/download", s.graphMgr.handleDownloadCurrentPcap)
+	// Apply rate limiting to API endpoints
+	mux.HandleFunc("/api/graph", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleGraphAPI))
+	mux.HandleFunc("/api/pcaps", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleListPcaps))
+	mux.HandleFunc("/api/replay", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleReplayPcap))
+	mux.HandleFunc("/api/download", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleDownloadCurrentPcap))
+	// Stream API endpoints
+	mux.HandleFunc("/api/streams", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleListStreams))
+	mux.HandleFunc("/api/stream", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleGetStream))
+	mux.HandleFunc("/api/streams/stats", s.rateLimiter.RateLimitHandlerFunc(s.graphMgr.handleGetStreamStats))
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
 	// Create HTTPS server

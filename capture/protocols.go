@@ -24,36 +24,39 @@ var (
 	ProtocolSMTP       = Protocol{"SMTP", "#8b4513"}
 	ProtocolMySQL      = Protocol{"MySQL", "#34495e"}
 	ProtocolPostgreSQL = Protocol{"PostgreSQL", "#16a085"}
+	ProtocolInfluxDB   = Protocol{"InfluxDB", "#22ADF6"}
+	ProtocolSlurm      = Protocol{"Slurm", "#ff7f50"}
 	ProtocolARP        = Protocol{"ARP", "#95a5a6"}
 	ProtocolIPv6       = Protocol{"IPv6", "#7f8c8d"}
 	ProtocolOther      = Protocol{"Other", "#ecf0f1"}
 )
 
-// DetectProtocol analyzes a packet and returns the detected protocol
+// DetectProtocol analyzes a packet and returns the detected protocol.
+// Works with both IPv4 and IPv6 packets - gopacket extracts transport layers from either.
 func DetectProtocol(packet gopacket.Packet) Protocol {
-	// Check for ARP
+	// Check for ARP (IPv4 only)
 	if packet.Layer(layers.LayerTypeARP) != nil {
 		return ProtocolARP
 	}
 
-	// Check for ICMP
+	// Check for ICMP (both IPv4 and IPv6)
 	if packet.Layer(layers.LayerTypeICMPv4) != nil || packet.Layer(layers.LayerTypeICMPv6) != nil {
 		return ProtocolICMP
 	}
 
-	// Check for TCP-based protocols
+	// Check for TCP-based protocols (works for both IPv4 and IPv6)
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		tcp, _ := tcpLayer.(*layers.TCP)
 		return detectTCPProtocol(tcp)
 	}
 
-	// Check for UDP-based protocols
+	// Check for UDP-based protocols (works for both IPv4 and IPv6)
 	if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
 		udp, _ := udpLayer.(*layers.UDP)
 		return detectUDPProtocol(udp)
 	}
 
-	// Check if it's IPv6
+	// IPv6 packets without TCP/UDP/ICMP (e.g., neighbor discovery, router advertisements)
 	if packet.Layer(layers.LayerTypeIPv6) != nil {
 		return ProtocolIPv6
 	}
@@ -86,6 +89,12 @@ func detectTCPProtocol(tcp *layers.TCP) Protocol {
 		return ProtocolMySQL
 	case srcPort == 5432 || dstPort == 5432:
 		return ProtocolPostgreSQL
+	case srcPort == 8086 || dstPort == 8086:
+		return ProtocolInfluxDB
+	case srcPort == 6817 || dstPort == 6817:
+		return ProtocolSlurm // slurmctld
+	case srcPort == 6818 || dstPort == 6818:
+		return ProtocolSlurm // slurmd
 	case srcPort == 8080 || dstPort == 8080:
 		return ProtocolHTTP // Alternative HTTP
 	case srcPort == 8443 || dstPort == 8443:
@@ -123,6 +132,8 @@ func GetAllProtocols() []Protocol {
 		ProtocolSMTP,
 		ProtocolMySQL,
 		ProtocolPostgreSQL,
+		ProtocolInfluxDB,
+		ProtocolSlurm,
 		ProtocolARP,
 		ProtocolIPv6,
 		ProtocolOther,

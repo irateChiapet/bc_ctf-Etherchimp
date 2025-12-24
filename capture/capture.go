@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -23,6 +25,28 @@ type PacketInfo struct {
 	Protocol Protocol
 	Length   int
 	Payload  []byte // Raw packet payload data
+}
+
+// isLinkLocalAddress checks if an IP address is link-local
+// IPv4 link-local: 169.254.0.0/16
+// IPv6 link-local: fe80::/10
+func isLinkLocalAddress(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	// Check IPv4 link-local (169.254.x.x)
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 169 && ip4[1] == 254
+	}
+
+	// Check IPv6 link-local (fe80::/10)
+	if strings.HasPrefix(strings.ToLower(ipStr), "fe80:") {
+		return true
+	}
+
+	return false
 }
 
 // Capture manages packet capture from a network interface
@@ -164,6 +188,11 @@ func ProcessPacket(packet gopacket.Packet) *PacketInfo {
 			arp.DstProtAddress[2], arp.DstProtAddress[3])
 	} else {
 		// Skip packets without IP information
+		return nil
+	}
+
+	// Skip link-local addresses (IPv4 169.254.x.x, IPv6 fe80::)
+	if isLinkLocalAddress(srcIP) || isLinkLocalAddress(dstIP) {
 		return nil
 	}
 

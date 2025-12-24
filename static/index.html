@@ -259,6 +259,58 @@
                     </div>
                 </li>
 
+                <!-- Streams Section -->
+                <li class="nav-item" data-tooltip="Streams">
+                    <button class="nav-link" id="streamsToggle">
+                        <svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 4h16v4H4z"></path>
+                            <path d="M4 10h16v4H4z"></path>
+                            <path d="M4 16h16v4H4z"></path>
+                            <line x1="8" y1="6" x2="20" y2="6"></line>
+                            <line x1="8" y1="12" x2="20" y2="12"></line>
+                            <line x1="8" y1="18" x2="20" y2="18"></line>
+                        </svg>
+                        <span class="nav-text">Streams</span>
+                        <svg class="nav-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M6 9l6 6 6-6"></path>
+                        </svg>
+                    </button>
+                    <div class="submenu" id="streamsSubmenu">
+                        <div class="streams-controls">
+                            <div class="streams-filter">
+                                <select id="streamProtocolFilter" class="stream-filter-select">
+                                    <option value="">All Protocols</option>
+                                    <option value="HTTP">HTTP</option>
+                                    <option value="HTTPS">HTTPS</option>
+                                    <option value="DNS">DNS</option>
+                                    <option value="SSH">SSH</option>
+                                    <option value="SMTP">SMTP</option>
+                                    <option value="FTP">FTP</option>
+                                    <option value="MySQL">MySQL</option>
+                                    <option value="PostgreSQL">PostgreSQL</option>
+                                    <option value="InfluxDB">InfluxDB</option>
+                                    <option value="Redis">Redis</option>
+                                    <option value="Slurm">Slurm</option>
+                                    <option value="Unknown">Unknown</option>
+                                </select>
+                            </div>
+                            <div class="streams-stats" id="streamsStats">
+                                <span class="stream-stat">Streams: <span id="streamCount">0</span></span>
+                            </div>
+                            <div class="streams-list" id="streamsList">
+                                <div class="loading">Loading streams...</div>
+                            </div>
+                            <button class="replay-button" id="refreshStreamsButton">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                                Refresh Streams
+                            </button>
+                        </div>
+                    </div>
+                </li>
+
                 <!-- Chimpy Mode -->
                 <li class="nav-item" data-tooltip="Chimpy Mode">
                     <button class="nav-link" id="chimpyToggle">
@@ -378,6 +430,28 @@
                 <span id="timelineStartLabel">Start</span>
                 <span id="timelineEndLabel">End</span>
             </div>
+        </div>
+    </div>
+
+    <!-- Stream Detail Panel -->
+    <div class="stream-detail-panel" id="streamDetailPanel" style="display: none;">
+        <div class="stream-detail-header">
+            <div class="stream-detail-title">
+                <h3 id="streamDetailTitle">Stream Details</h3>
+                <span class="stream-protocol-badge" id="streamProtocolBadge">HTTP</span>
+            </div>
+            <button class="stream-detail-close" id="streamDetailClose">&times;</button>
+        </div>
+        <div class="stream-detail-meta" id="streamDetailMeta">
+            <!-- Stream metadata will be populated here -->
+        </div>
+        <div class="stream-detail-tabs">
+            <button class="stream-tab active" data-stream-tab="decoded" id="streamDecodedTab">Decoded</button>
+            <button class="stream-tab" data-stream-tab="raw" id="streamRawTab">Raw Data</button>
+            <button class="stream-tab" data-stream-tab="packets" id="streamPacketsTab">Packets</button>
+        </div>
+        <div class="stream-detail-content" id="streamDetailContent">
+            <pre class="stream-content-pre" id="streamContentPre">Loading...</pre>
         </div>
     </div>
 
