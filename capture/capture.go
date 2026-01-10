@@ -27,22 +27,51 @@ type PacketInfo struct {
 	Payload  []byte // Raw packet payload data
 }
 
-// isLinkLocalAddress checks if an IP address is link-local
-// IPv4 link-local: 169.254.0.0/16
-// IPv6 link-local: fe80::/10
-func isLinkLocalAddress(ipStr string) bool {
+// isLocalOrMulticastAddress checks if an IP address is local/link-local/multicast
+// These are filtered out as they clutter the graph with non-routable addresses
+func isLocalOrMulticastAddress(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
 
-	// Check IPv4 link-local (169.254.x.x)
+	// Check IPv4
 	if ip4 := ip.To4(); ip4 != nil {
-		return ip4[0] == 169 && ip4[1] == 254
+		// Link-local: 169.254.x.x
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+		// Multicast: 224.0.0.0 - 239.255.255.255
+		if ip4[0] >= 224 && ip4[0] <= 239 {
+			return true
+		}
+		// Loopback: 127.x.x.x
+		if ip4[0] == 127 {
+			return true
+		}
+		return false
 	}
 
-	// Check IPv6 link-local (fe80::/10)
-	if strings.HasPrefix(strings.ToLower(ipStr), "fe80:") {
+	// Check IPv6
+	lowerIP := strings.ToLower(ipStr)
+
+	// Link-local: fe80::/10
+	if strings.HasPrefix(lowerIP, "fe80:") {
+		return true
+	}
+
+	// Multicast: ff00::/8 (includes ff02::, ff01::, etc.)
+	if strings.HasPrefix(lowerIP, "ff") {
+		return true
+	}
+
+	// Loopback: ::1
+	if ip.Equal(net.IPv6loopback) {
+		return true
+	}
+
+	// Unique local addresses: fc00::/7 (fd00::/8 is commonly used)
+	if strings.HasPrefix(lowerIP, "fc") || strings.HasPrefix(lowerIP, "fd") {
 		return true
 	}
 
@@ -191,8 +220,8 @@ func ProcessPacket(packet gopacket.Packet) *PacketInfo {
 		return nil
 	}
 
-	// Skip link-local addresses (IPv4 169.254.x.x, IPv6 fe80::)
-	if isLinkLocalAddress(srcIP) || isLinkLocalAddress(dstIP) {
+	// Skip local/multicast addresses (clutters the graph)
+	if isLocalOrMulticastAddress(srcIP) || isLocalOrMulticastAddress(dstIP) {
 		return nil
 	}
 

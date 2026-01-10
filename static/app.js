@@ -34,10 +34,16 @@ const MAX_CACHED_PACKETS = 5000; // Keep last 5000 packets in memory
 // Performance optimization settings
 const MAX_NODES = 100; // Maximum nodes to display
 const MAX_EDGES = 200; // Maximum edges to display
-const UPDATE_THROTTLE_MS = 100; // Throttle updates to once per 100ms
+let UPDATE_THROTTLE_MS = 150; // Base throttle (dynamically adjusted)
 let lastUpdateTime = 0;
 let pendingUpdate = null;
 let updateScheduled = false;
+
+// Delta update tracking - only update nodes/edges that actually changed
+const nodeStateCache = new Map(); // id -> { packetCount, byteCount, colorTier }
+const edgeStateCache = new Map(); // id -> { packetCount, byteCount }
+let lastPacketPanelRefresh = 0;
+
 
 // Replay mode state
 let replayMode = {
@@ -82,72 +88,73 @@ function getPerformanceTier(nodeCount) {
 }
 
 // Get physics settings based on performance tier
+// Tuned for orbital spacing - popular nodes repel strongly, spread into orbits
 function getPhysicsSettings(tier) {
     const settings = {
         low: {
-            stabilization: { iterations: 150, updateInterval: 25 },
+            stabilization: { iterations: 100, updateInterval: 25 },
             barnesHut: {
-                gravitationalConstant: -8000,
-                centralGravity: 0.3,
-                springLength: 150,
-                springConstant: 0.04,
-                damping: 0.09,
-                avoidOverlap: 0.5
+                gravitationalConstant: -10000,  // Very strong repulsion - nodes push apart
+                centralGravity: 0.1,            // Weak center pull - allows spreading
+                springLength: 300,              // Very long springs
+                springConstant: 0.005,          // Extremely soft springs - repulsion wins
+                damping: 0.15,                  // Smooth movement
+                avoidOverlap: 1.0
             },
-            timestep: 0.5,
-            minVelocity: 0.75
+            timestep: 0.35,
+            minVelocity: 0.1
         },
         medium: {
-            stabilization: { iterations: 100, updateInterval: 50 },
+            stabilization: { iterations: 80, updateInterval: 50 },
             barnesHut: {
-                gravitationalConstant: -5000,
-                centralGravity: 0.3,
-                springLength: 120,
-                springConstant: 0.05,
+                gravitationalConstant: -8000,
+                centralGravity: 0.1,
+                springLength: 280,
+                springConstant: 0.005,
                 damping: 0.15,
-                avoidOverlap: 0.3
+                avoidOverlap: 1.0
             },
-            timestep: 0.75,
-            minVelocity: 1.0
+            timestep: 0.35,
+            minVelocity: 0.1
         },
         high: {
             stabilization: { iterations: 50, updateInterval: 100 },
             barnesHut: {
-                gravitationalConstant: -3000,
-                centralGravity: 0.5,
-                springLength: 100,
-                springConstant: 0.08,
-                damping: 0.3,
-                avoidOverlap: 0
+                gravitationalConstant: -6000,
+                centralGravity: 0.15,
+                springLength: 250,
+                springConstant: 0.008,
+                damping: 0.18,
+                avoidOverlap: 0.9
             },
-            timestep: 1.0,
-            minVelocity: 2.0
+            timestep: 0.4,
+            minVelocity: 0.15
         },
         extreme: {
             stabilization: { iterations: 30, updateInterval: 100 },
             barnesHut: {
-                gravitationalConstant: -2000,
-                centralGravity: 0.8,
-                springLength: 80,
-                springConstant: 0.1,
-                damping: 0.5,
-                avoidOverlap: 0
+                gravitationalConstant: -5000,
+                centralGravity: 0.2,
+                springLength: 220,
+                springConstant: 0.01,
+                damping: 0.2,
+                avoidOverlap: 0.8
             },
-            timestep: 1.5,
-            minVelocity: 3.0
+            timestep: 0.45,
+            minVelocity: 0.2
         },
         maximum: {
-            stabilization: { iterations: 15, updateInterval: 200 },
+            stabilization: { iterations: 20, updateInterval: 200 },
             barnesHut: {
-                gravitationalConstant: -1000,
-                centralGravity: 1.0,
-                springLength: 60,
-                springConstant: 0.15,
-                damping: 0.7,
-                avoidOverlap: 0
+                gravitationalConstant: -4000,
+                centralGravity: 0.25,
+                springLength: 180,
+                springConstant: 0.015,
+                damping: 0.25,
+                avoidOverlap: 0.7
             },
-            timestep: 2.0,
-            minVelocity: 5.0
+            timestep: 0.5,
+            minVelocity: 0.3
         }
     };
     return settings[tier] || settings.medium;
@@ -195,6 +202,8 @@ function getNetworkOptions() {
                 y: 5
             },
             scaling: {
+                min: 15,          // Minimum node size
+                max: 50,          // Maximum node size (high traffic nodes)
                 label: {
                     enabled: !hideLabelsOnZoom,
                     min: hideLabelsOnZoom ? 0 : 10,
@@ -205,10 +214,8 @@ function getNetworkOptions() {
         edges: {
             width: tier === 'maximum' ? 1 : 2,
             arrows: {
-                to: {
-                    enabled: true,
-                    scaleFactor: tier === 'maximum' ? 0.3 : 0.5
-                }
+                to: { enabled: false },
+                from: { enabled: false }
             },
             smooth: smoothEdges ? {
                 type: 'continuous',
@@ -268,10 +275,8 @@ function setupNetwork() {
 
     network = new vis.Network(container, data, options);
 
-    // Performance optimization: Stop physics after stabilization
+    // After initial stabilization, apply saved layout if any
     network.on('stabilizationIterationsDone', function() {
-        network.setOptions({ physics: { enabled: false } });
-
         // Apply saved cluster layout after initial stabilization
         if (nodes.length > 0) {
             const savedLayout = localStorage.getItem('clusterLayout') || 'force';
@@ -279,20 +284,6 @@ function setupNetwork() {
                 applyClusterLayout(savedLayout);
             }
         }
-    });
-
-    // Re-enable physics when nodes are dragged
-    network.on('dragStart', function() {
-        network.setOptions({ physics: { enabled: true } });
-    });
-
-    network.on('dragEnd', function() {
-        // Let physics settle for 2 seconds then stop
-        setTimeout(function() {
-            if (network) {
-                network.stopSimulation();
-            }
-        }, 2000);
     });
 
     // Handle node/edge selection
@@ -1592,6 +1583,16 @@ function connectWebSocket() {
 
 // Throttled update to prevent overwhelming the visualization
 function throttledUpdateGraph(data) {
+    // Dynamic throttle based on node count - keeps things responsive
+    const nodeCount = data.nodes ? data.nodes.length : 0;
+    if (nodeCount > 50) {
+        UPDATE_THROTTLE_MS = 200;  // 50+ nodes: update every 200ms
+    } else if (nodeCount > 25) {
+        UPDATE_THROTTLE_MS = 150;  // 25-50 nodes: update every 150ms
+    } else {
+        UPDATE_THROTTLE_MS = 100;  // <25 nodes: update every 100ms (fluid)
+    }
+
     pendingUpdate = data;
 
     if (updateScheduled) {
@@ -1666,6 +1667,14 @@ function getNodeColorByTraffic(packetCount, lowThreshold, mediumThreshold) {
 }
 
 // Update graph with new data
+// Helper to determine color tier for delta comparison
+function getColorTier(packetCount, lowThreshold, mediumThreshold) {
+    if (packetCount === 0) return 0;
+    if (packetCount < lowThreshold) return 1;
+    if (packetCount < mediumThreshold) return 2;
+    return 3;
+}
+
 function updateGraph(data) {
     // Performance monitoring
     const totalNodes = data.nodes.length;
@@ -1686,35 +1695,57 @@ function updateGraph(data) {
     const lowThreshold = maxPacketCount * 0.2;
     const mediumThreshold = maxPacketCount * 0.5;
 
-    // Update nodes
-    const nodeUpdates = sortedNodes.map(node => {
-        const color = getNodeColorByTraffic(node.packetCount, lowThreshold, mediumThreshold);
-
-        return {
-            id: node.id,
-            label: formatNodeLabel(node),
-            title: formatNodeTooltip(node),
-            value: Math.log(node.packetCount + 1) * 5, // Size based on packet count
-            color: color,
-            ips: node.ips || [node.id], // Store IPs for details panel
-            hostname: node.label,
-            packetCount: node.packetCount,
-            byteCount: node.byteCount
-        };
-    });
-
-    // Get current node IDs
+    // Get current node IDs for comparison
     const currentNodeIds = new Set(nodes.getIds());
-    const newNodeIds = new Set(nodeUpdates.map(n => n.id));
+    const newNodeIds = new Set(sortedNodes.map(n => n.id));
 
-    // Remove nodes that no longer exist or are below the threshold
+    // DELTA UPDATE: Only update nodes that actually changed
+    const nodeUpdates = [];
+    for (const node of sortedNodes) {
+        const colorTier = getColorTier(node.packetCount, lowThreshold, mediumThreshold);
+        const cached = nodeStateCache.get(node.id);
+        const isNew = !currentNodeIds.has(node.id);
+
+        // Only update if: new node, packet count changed significantly, or color tier changed
+        const needsUpdate = isNew ||
+            !cached ||
+            cached.colorTier !== colorTier ||
+            Math.abs(cached.packetCount - node.packetCount) > cached.packetCount * 0.1; // 10% change threshold
+
+        if (needsUpdate) {
+            const color = getNodeColorByTraffic(node.packetCount, lowThreshold, mediumThreshold);
+            // Value for scaling: sqrt gives better visual spread than log for node sizes
+            const value = Math.sqrt(node.packetCount + 1) * 3;
+            const nodeData = {
+                id: node.id,
+                label: formatNodeLabel(node),
+                title: formatNodeTooltip(node),
+                value: value,
+                color: color,
+                ips: node.ips || [node.id],
+                hostname: node.label,
+                packetCount: node.packetCount,
+                byteCount: node.byteCount
+            };
+            nodeUpdates.push(nodeData);
+        }
+
+        // Update cache
+        nodeStateCache.set(node.id, { packetCount: node.packetCount, byteCount: node.byteCount, colorTier });
+    }
+
+    // Remove nodes that no longer exist
     const nodesToRemove = [...currentNodeIds].filter(id => !newNodeIds.has(id));
     if (nodesToRemove.length > 0) {
         nodes.remove(nodesToRemove);
+        nodesToRemove.forEach(id => nodeStateCache.delete(id));
     }
 
-    // Update or add nodes
-    nodes.update(nodeUpdates);
+    // Only call update if there are actual changes
+    if (nodeUpdates.length > 0) {
+        nodes.update(nodeUpdates);
+    }
+
 
     // Filter edges to only those between visible nodes, then sort by packet count and limit
     const visibleNodeIds = newNodeIds;
@@ -1723,57 +1754,51 @@ function updateGraph(data) {
         .sort((a, b) => b.packetCount - a.packetCount)
         .slice(0, MAX_EDGES);
 
-    // Update edges
-    const edgeUpdates = filteredEdges.map(edge => ({
-        id: edge.id,
-        from: edge.from,
-        to: edge.to,
-        label: formatEdgeLabel(edge),
-        title: formatEdgeTooltip(edge),
-        color: { color: edge.protocol.Color },
-        width: Math.log(edge.packetCount + 1) * 0.5 + 1,
-        protocol: edge.protocol,
-        hidden: protocolFilters.has(edge.protocol.Name),
-        packetCount: edge.packetCount,
-        byteCount: edge.byteCount
-    }));
-
-    // Get current edge IDs
+    // Get current edge IDs for comparison
     const currentEdgeIds = new Set(edges.getIds());
-    const newEdgeIds = new Set(edgeUpdates.map(e => e.id));
+    const newEdgeIds = new Set(filteredEdges.map(e => e.id));
 
-    // Remove edges that no longer exist or are no longer in top MAX_EDGES
+    // DELTA UPDATE: Only update edges that actually changed
+    const edgeUpdates = [];
+    for (const edge of filteredEdges) {
+        const cached = edgeStateCache.get(edge.id);
+        const isNew = !currentEdgeIds.has(edge.id);
+
+        // Only update if: new edge or packet count changed significantly
+        const needsUpdate = isNew ||
+            !cached ||
+            Math.abs(cached.packetCount - edge.packetCount) > cached.packetCount * 0.1;
+
+        if (needsUpdate) {
+            edgeUpdates.push({
+                id: edge.id,
+                from: edge.from,
+                to: edge.to,
+                label: formatEdgeLabel(edge),
+                title: formatEdgeTooltip(edge),
+                color: { color: edge.protocol.Color },
+                width: Math.log(edge.packetCount + 1) * 0.5 + 1,
+                protocol: edge.protocol,
+                hidden: protocolFilters.has(edge.protocol.Name),
+                packetCount: edge.packetCount,
+                byteCount: edge.byteCount
+            });
+        }
+
+        // Update cache
+        edgeStateCache.set(edge.id, { packetCount: edge.packetCount, byteCount: edge.byteCount });
+    }
+
+    // Remove edges that no longer exist
     const edgesToRemove = [...currentEdgeIds].filter(id => !newEdgeIds.has(id));
     if (edgesToRemove.length > 0) {
         edges.remove(edgesToRemove);
+        edgesToRemove.forEach(id => edgeStateCache.delete(id));
     }
 
-    // Update or add edges
-    edges.update(edgeUpdates);
-
-    // Reapply gravity masses if in gravity mode
-    if (currentClusterLayout === 'gravity') {
-        const nodePacketCounts = new Map();
-
-        // Calculate incoming packet counts
-        edges.get().forEach(edge => {
-            if (!edge.hidden) {
-                const toNode = edge.to;
-                const packetCount = edge.packetCount || 0;
-                nodePacketCounts.set(toNode, (nodePacketCounts.get(toNode) || 0) + packetCount);
-            }
-        });
-
-        // Update node masses with stable calculation
-        const maxPackets = Math.max(...Array.from(nodePacketCounts.values()), 1);
-        nodes.getIds().forEach(id => {
-            const incomingPackets = nodePacketCounts.get(id) || 1;
-            const mass = 1 + (Math.log(incomingPackets + 1) * 2); // Same stable formula
-            nodes.update({
-                id: id,
-                mass: mass
-            });
-        });
+    // Only call update if there are actual changes
+    if (edgeUpdates.length > 0) {
+        edges.update(edgeUpdates);
     }
 
     // Update packets list and cache
@@ -1794,9 +1819,11 @@ function updateGraph(data) {
             toDelete.forEach(id => packetCache.delete(id));
         }
 
-        // Auto-refresh packet panel if it's visible
+        // Debounced packet panel refresh (max once per 500ms)
+        const now = Date.now();
         const packetPanel = document.getElementById('packetPanel');
-        if (packetPanel && packetPanel.classList.contains('show')) {
+        if (packetPanel && packetPanel.classList.contains('show') && (now - lastPacketPanelRefresh) > 500) {
+            lastPacketPanelRefresh = now;
             loadPackets();
         }
     }
@@ -1846,9 +1873,20 @@ function formatEdgeLabel(edge) {
     return `${edge.protocol.Name} (${edge.packetCount})`;
 }
 
-// Format edge tooltip
+// Format edge tooltip (bidirectional)
 function formatEdgeTooltip(edge) {
-    return `${edge.from} → ${edge.to}\nProtocol: ${edge.protocol.Name}\nPackets: ${edge.packetCount}\nBytes: ${formatBytes(edge.byteCount)}`;
+    let tooltip = `${edge.from} ↔ ${edge.to}\nProtocol: ${edge.protocol.Name}\n`;
+    tooltip += `Total: ${edge.packetCount} pkts, ${formatBytes(edge.byteCount)}\n`;
+    // Show directional breakdown if available
+    if (edge.forwardPackets !== undefined || edge.reversePackets !== undefined) {
+        const fwdPkts = edge.forwardPackets || 0;
+        const revPkts = edge.reversePackets || 0;
+        const fwdBytes = edge.forwardBytes || 0;
+        const revBytes = edge.reverseBytes || 0;
+        tooltip += `→ ${fwdPkts} pkts (${formatBytes(fwdBytes)})\n`;
+        tooltip += `← ${revPkts} pkts (${formatBytes(revBytes)})`;
+    }
+    return tooltip;
 }
 
 // Format bytes for display

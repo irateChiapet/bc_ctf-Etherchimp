@@ -17,7 +17,7 @@ type Node struct {
 	LastSeen   time.Time `json:"lastSeen"`
 }
 
-// Edge represents a connection between two nodes
+// Edge represents a bidirectional connection between two nodes
 type Edge struct {
 	ID          string            `json:"id"`
 	From        string            `json:"from"`
@@ -26,6 +26,19 @@ type Edge struct {
 	PacketCount int               `json:"packetCount"`
 	ByteCount   int64             `json:"byteCount"`
 	LastSeen    time.Time         `json:"lastSeen"`
+	// Bidirectional tracking
+	ForwardPackets int   `json:"forwardPackets"` // From -> To
+	ReversePackets int   `json:"reversePackets"` // To -> From
+	ForwardBytes   int64 `json:"forwardBytes"`
+	ReverseBytes   int64 `json:"reverseBytes"`
+}
+
+// getCanonicalEdgeID returns a consistent edge ID regardless of direction
+func getCanonicalEdgeID(nodeA, nodeB string) (edgeID, from, to string) {
+	if nodeA < nodeB {
+		return nodeA + "<->" + nodeB, nodeA, nodeB
+	}
+	return nodeB + "<->" + nodeA, nodeB, nodeA
 }
 
 // GraphSnapshot represents the current state of the graph
@@ -124,23 +137,25 @@ func (m *Manager) AddOrUpdateNode(ip, hostname string, bytes int) {
 
 		for edgeID, edge := range m.edges {
 			updated := false
+			newFrom := edge.From
+			newTo := edge.To
 			if edge.From == existingNodeID {
-				edge.From = nodeID
+				newFrom = nodeID
 				updated = true
 			}
 			if edge.To == existingNodeID {
-				edge.To = nodeID
+				newTo = nodeID
 				updated = true
 			}
 			if updated {
-				// Calculate new edge ID
-				newEdgeID := edge.From + "->" + edge.To
-
 				// Skip self-loops that might be created by merging
-				if edge.From == edge.To {
+				if newFrom == newTo {
 					edgesToDelete = append(edgesToDelete, edgeID)
 					continue
 				}
+
+				// Calculate new canonical edge ID
+				newEdgeID, canonicalFrom, canonicalTo := getCanonicalEdgeID(newFrom, newTo)
 
 				if newEdgeID != edgeID {
 					edgesToDelete = append(edgesToDelete, edgeID)
@@ -150,6 +165,10 @@ func (m *Manager) AddOrUpdateNode(ip, hostname string, bytes int) {
 						// Merge edge stats
 						existingEdge.PacketCount += edge.PacketCount
 						existingEdge.ByteCount += edge.ByteCount
+						existingEdge.ForwardPackets += edge.ForwardPackets
+						existingEdge.ReversePackets += edge.ReversePackets
+						existingEdge.ForwardBytes += edge.ForwardBytes
+						existingEdge.ReverseBytes += edge.ReverseBytes
 						if edge.LastSeen.After(existingEdge.LastSeen) {
 							existingEdge.LastSeen = edge.LastSeen
 						}
@@ -157,12 +176,18 @@ func (m *Manager) AddOrUpdateNode(ip, hostname string, bytes int) {
 						// Merge with pending edge
 						pendingEdge.PacketCount += edge.PacketCount
 						pendingEdge.ByteCount += edge.ByteCount
+						pendingEdge.ForwardPackets += edge.ForwardPackets
+						pendingEdge.ReversePackets += edge.ReversePackets
+						pendingEdge.ForwardBytes += edge.ForwardBytes
+						pendingEdge.ReverseBytes += edge.ReverseBytes
 						if edge.LastSeen.After(pendingEdge.LastSeen) {
 							pendingEdge.LastSeen = edge.LastSeen
 						}
 					} else {
-						// Add as new edge
+						// Add as new edge with canonical ordering
 						edge.ID = newEdgeID
+						edge.From = canonicalFrom
+						edge.To = canonicalTo
 						edgesToAdd[newEdgeID] = edge
 					}
 				}
@@ -217,7 +242,7 @@ func (m *Manager) AddOrUpdateNode(ip, hostname string, bytes int) {
 	}
 }
 
-// AddOrUpdateEdge adds a new edge or updates an existing one
+// AddOrUpdateEdge adds a new edge or updates an existing one (bidirectional)
 func (m *Manager) AddOrUpdateEdge(srcIP, dstIP string, protocol capture.Protocol, bytes int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -233,23 +258,41 @@ func (m *Manager) AddOrUpdateEdge(srcIP, dstIP string, protocol capture.Protocol
 		dstNodeID = nodeID
 	}
 
-	edgeID := srcNodeID + "->" + dstNodeID
+	// Use canonical edge ID for bidirectional edges
+	edgeID, canonicalFrom, canonicalTo := getCanonicalEdgeID(srcNodeID, dstNodeID)
+	isForward := srcNodeID == canonicalFrom // true if packet flows From -> To
+
 	edge, exists := m.edges[edgeID]
 
 	if !exists {
-		m.edges[edgeID] = &Edge{
+		newEdge := &Edge{
 			ID:          edgeID,
-			From:        srcNodeID,
-			To:          dstNodeID,
+			From:        canonicalFrom,
+			To:          canonicalTo,
 			Protocol:    protocol,
 			PacketCount: 1,
 			ByteCount:   int64(bytes),
 			LastSeen:    time.Now(),
 		}
+		if isForward {
+			newEdge.ForwardPackets = 1
+			newEdge.ForwardBytes = int64(bytes)
+		} else {
+			newEdge.ReversePackets = 1
+			newEdge.ReverseBytes = int64(bytes)
+		}
+		m.edges[edgeID] = newEdge
 	} else {
 		edge.PacketCount++
 		edge.ByteCount += int64(bytes)
 		edge.LastSeen = time.Now()
+		if isForward {
+			edge.ForwardPackets++
+			edge.ForwardBytes += int64(bytes)
+		} else {
+			edge.ReversePackets++
+			edge.ReverseBytes += int64(bytes)
+		}
 		// Update protocol if it's more specific
 		if protocol.Name != "TCP" && protocol.Name != "UDP" {
 			edge.Protocol = protocol
