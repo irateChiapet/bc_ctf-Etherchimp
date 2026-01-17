@@ -3551,6 +3551,7 @@ const gameMode = {
     mouse: new THREE.Vector2(),
     nodeMeshes: [],
     nodeDataMap: new Map(), // mesh.uuid -> node data
+    nodeIdToMesh: new Map(), // node.id -> mesh (for incremental updates)
     stars: null,
     nebulae: [],
     ambientDust: null,
@@ -3642,6 +3643,7 @@ function toggleGameMode() {
         });
         gameMode.nodeMeshes = [];
         gameMode.nodeDataMap.clear();
+        gameMode.nodeIdToMesh.clear();
 
         // Cleanup nebulae
         gameMode.nebulae.forEach(nebula => {
@@ -3928,8 +3930,8 @@ function createNebulae() {
     ];
 
     // Create massive nebula clouds spanning the scene
-    for (let n = 0; n < 25; n++) {
-        const particleCount = 6000;
+    for (let n = 0; n < 10; n++) {
+        const particleCount = 2000;
         const positions = new Float32Array(particleCount * 3);
         const colors = new Float32Array(particleCount * 3);
 
@@ -3999,8 +4001,8 @@ function createNebulae() {
     }
 
     // Add bright emission nebulae (star-forming regions)
-    for (let n = 0; n < 10; n++) {
-        const particleCount = 3000;
+    for (let n = 0; n < 5; n++) {
+        const particleCount = 1000;
         const positions = new Float32Array(particleCount * 3);
         const colors = new Float32Array(particleCount * 3);
 
@@ -4057,8 +4059,8 @@ function createNebulae() {
     }
 
     // Add dark nebulae (dust clouds that obscure background)
-    for (let n = 0; n < 8; n++) {
-        const particleCount = 2000;
+    for (let n = 0; n < 4; n++) {
+        const particleCount = 800;
         const positions = new Float32Array(particleCount * 3);
         const colors = new Float32Array(particleCount * 3);
 
@@ -4152,7 +4154,7 @@ function createDistantGalaxies() {
 // Create realistic starfield background with multiple layers
 function createStarfield() {
     // Layer 0: Ultra-distant faint stars (creates depth)
-    const ultraDistantCount = 80000;
+    const ultraDistantCount = 20000;
     const ultraDistantPositions = new Float32Array(ultraDistantCount * 3);
     const ultraDistantColors = new Float32Array(ultraDistantCount * 3);
 
@@ -4187,7 +4189,7 @@ function createStarfield() {
     gameMode.scene.add(ultraDistantStars);
 
     // Layer 1: Distant dim stars (most numerous)
-    const distantStarCount = 50000;
+    const distantStarCount = 15000;
     const distantPositions = new Float32Array(distantStarCount * 3);
     const distantColors = new Float32Array(distantStarCount * 3);
 
@@ -4257,7 +4259,7 @@ function createStarfield() {
     gameMode.scene.add(distantStars);
 
     // Layer 2: Mid-range stars
-    const midStarCount = 25000;
+    const midStarCount = 8000;
     const midPositions = new Float32Array(midStarCount * 3);
     const midColors = new Float32Array(midStarCount * 3);
 
@@ -4413,7 +4415,7 @@ function createStarfield() {
 
 // Create the galactic plane (Milky Way band)
 function createGalacticPlane() {
-    const particleCount = 40000;
+    const particleCount = 12000;
     const positions = new Float32Array(particleCount * 3);
     const colors = new Float32Array(particleCount * 3);
 
@@ -4470,7 +4472,7 @@ function createGalacticPlane() {
     gameMode.scene.add(galacticPlane);
 
     // Add denser core region
-    const coreCount = 15000;
+    const coreCount = 5000;
     const corePositions = new Float32Array(coreCount * 3);
     const coreColors = new Float32Array(coreCount * 3);
 
@@ -4511,8 +4513,8 @@ function createGalacticPlane() {
 // Create cosmic dust clouds and floating debris
 function createCosmicDust() {
     // Vast dust lanes spanning the scene
-    for (let d = 0; d < 12; d++) {
-        const dustCount = 5000;
+    for (let d = 0; d < 6; d++) {
+        const dustCount = 1500;
         const positions = new Float32Array(dustCount * 3);
         const colors = new Float32Array(dustCount * 3);
 
@@ -4573,7 +4575,7 @@ function createCosmicDust() {
     }
 
     // Add floating ice/debris particles throughout the system
-    const debrisCount = 15000;
+    const debrisCount = 5000;
     const debrisPositions = new Float32Array(debrisCount * 3);
     const debrisColors = new Float32Array(debrisCount * 3);
 
@@ -4961,6 +4963,10 @@ const PLANET_TYPES = [
 
 // Create spherical nodes from network data as realistic planets
 function createNodeSpheres() {
+    // Get current nodes from vis.js BEFORE clearing existing ones
+    const allNodes = nodes.get();
+    if (allNodes.length === 0) return;  // Don't clear if no new nodes to display
+
     // Clear existing nodes
     gameMode.nodeMeshes.forEach(mesh => {
         // Remove all children (atmosphere, rings, moons)
@@ -4971,15 +4977,13 @@ function createNodeSpheres() {
             if (child.material) child.material.dispose();
         }
         gameMode.scene.remove(mesh);
-        mesh.geometry.dispose();
-        mesh.material.dispose();
+        // Only dispose geometry/material if they exist (Groups don't have them)
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) mesh.material.dispose();
     });
     gameMode.nodeMeshes = [];
     gameMode.nodeDataMap.clear();
-
-    // Get current nodes from vis.js
-    const allNodes = nodes.get();
-    if (allNodes.length === 0) return;
+    gameMode.nodeIdToMesh.clear();
 
     // Position nodes in orbital rings around the sun
     const nodeCount = allNodes.length;
@@ -4994,8 +4998,8 @@ function createNodeSpheres() {
         // Calculate orbital position - vast solar system with huge sun
         const orbitRadius = 25000 + ring * 25000;  // Start further out, more spacing
         const angle = (positionInRing / nodesInRing) * Math.PI * 2 + ring * 0.5;
-        const verticalOffset = (Math.random() - 0.5) * 8000;
-        const orbitTilt = (Math.random() - 0.5) * 0.4; // Slight orbital plane tilt
+        const verticalOffset = (seededRandom(node.id, 'voff') - 0.5) * 8000;
+        const orbitTilt = (seededRandom(node.id, 'tilt') - 0.5) * 0.4; // Slight orbital plane tilt
 
         // Size based on packet count - MASSIVE planets (10x original)
         const packetCount = extractPacketCount(node.title) || 1;
@@ -5024,8 +5028,8 @@ function createNodeSpheres() {
         });
 
         const planet = new THREE.Mesh(geometry, material);
-        planet.rotation.x = Math.random() * 0.5;
-        planet.rotation.z = Math.random() * 0.3;
+        planet.rotation.x = seededRandom(node.id, 'rotx') * 0.5;
+        planet.rotation.z = seededRandom(node.id, 'rotz') * 0.3;
         planetGroup.add(planet);
 
         // Add surface features layer (continents/storms/terrain)
@@ -5040,11 +5044,11 @@ function createNodeSpheres() {
             blending: THREE.AdditiveBlending
         });
         const features = new THREE.Mesh(featureGeometry, featureMaterial);
-        features.rotation.y = Math.random() * Math.PI;
+        features.rotation.y = seededRandom(node.id, 'feat') * Math.PI;
         planetGroup.add(features);
 
         // Add cloud layer for atmospheric planets
-        if (planetType.hasAtmosphere && Math.random() > 0.3) {
+        if (planetType.hasAtmosphere && seededRandom(node.id, 'cloud') > 0.3) {
             const cloudGeometry = new THREE.SphereGeometry(size * 1.02, 48, 48);
             const cloudMaterial = new THREE.MeshPhongMaterial({
                 color: 0xffffff,
@@ -5054,7 +5058,7 @@ function createNodeSpheres() {
                 blending: THREE.NormalBlending
             });
             const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
-            clouds.userData.rotationSpeed = 0.0002 + Math.random() * 0.0003;
+            clouds.userData.rotationSpeed = 0.0002 + seededRandom(node.id, 'cloudspd') * 0.0003;
             planetGroup.add(clouds);
         }
 
@@ -5096,7 +5100,7 @@ function createNodeSpheres() {
             }
 
             // Great storm spot
-            if (Math.random() > 0.5) {
+            if (seededRandom(node.id, 'storm') > 0.5) {
                 const stormGeometry = new THREE.SphereGeometry(size * 0.15, 32, 32);
                 const stormMaterial = new THREE.MeshBasicMaterial({
                     color: 0xff6644,
@@ -5113,8 +5117,8 @@ function createNodeSpheres() {
         if (planetType.name === 'volcanic') {
             for (let v = 0; v < 8; v++) {
                 const volcanoGlow = new THREE.PointLight(0xff4400, 0.5, size * 0.8);
-                const theta = Math.random() * Math.PI * 2;
-                const phi = Math.random() * Math.PI;
+                const theta = seededRandom(node.id, 'vtheta' + v) * Math.PI * 2;
+                const phi = seededRandom(node.id, 'vphi' + v) * Math.PI;
                 volcanoGlow.position.set(
                     size * Math.sin(phi) * Math.cos(theta),
                     size * Math.cos(phi),
@@ -5149,7 +5153,7 @@ function createNodeSpheres() {
         }
 
         // Add rings to some planets (gas giants or random chance)
-        const hasRings = planetType.hasRings || (size > 1500 && Math.random() > 0.5);
+        const hasRings = planetType.hasRings || (size > 1500 && seededRandom(node.id, 'rings') > 0.5);
         if (hasRings) {
             const ringInnerRadius = size * 1.4;
             const ringOuterRadius = size * 2.2;
@@ -5161,16 +5165,16 @@ function createNodeSpheres() {
                 side: THREE.DoubleSide
             });
             const rings = new THREE.Mesh(ringGeometry, ringMaterial);
-            rings.rotation.x = Math.PI / 2 + (Math.random() - 0.5) * 0.3;
+            rings.rotation.x = Math.PI / 2 + (seededRandom(node.id, 'ringtilt') - 0.5) * 0.3;
             planetGroup.add(rings);
         }
 
         // Add moons to larger planets
-        if (size > 200 && Math.random() > 0.4) {
-            const moonCount = Math.floor(Math.random() * 4) + 1;
+        if (size > 200 && seededRandom(node.id, 'hasmoon') > 0.4) {
+            const moonCount = Math.floor(seededRandom(node.id, 'moonct') * 4) + 1;
             for (let m = 0; m < moonCount; m++) {
-                const moonSize = size * (0.08 + Math.random() * 0.12);
-                const moonDistance = size * (1.4 + m * 0.5 + Math.random() * 0.3);
+                const moonSize = size * (0.08 + seededRandom(node.id, 'moonsz' + m) * 0.12);
+                const moonDistance = size * (1.4 + m * 0.5 + seededRandom(node.id, 'moondst' + m) * 0.3);
                 const moonGeometry = new THREE.SphereGeometry(moonSize, 24, 24);
                 const moonMaterial = new THREE.MeshPhongMaterial({
                     color: 0x999999,
@@ -5179,9 +5183,17 @@ function createNodeSpheres() {
                 });
                 const moon = new THREE.Mesh(moonGeometry, moonMaterial);
                 moon.userData.moonOrbitRadius = moonDistance;
-                moon.userData.moonOrbitSpeed = 0.008 + Math.random() * 0.012;
-                moon.userData.moonOrbitAngle = Math.random() * Math.PI * 2;
-                moon.position.set(moonDistance, 0, 0);
+                moon.userData.moonOrbitSpeed = 0.008 + seededRandom(node.id, 'moonspd' + m) * 0.012;
+                // Spread moons evenly around planet, plus small random offset
+                const baseAngle = (m / moonCount) * Math.PI * 2;
+                const randomOffset = (seededRandom(node.id, 'moonang' + m) - 0.5) * 0.5;
+                moon.userData.moonOrbitAngle = baseAngle + randomOffset;
+                // Position moon using its orbit angle
+                moon.position.set(
+                    Math.cos(moon.userData.moonOrbitAngle) * moonDistance,
+                    0,
+                    Math.sin(moon.userData.moonOrbitAngle) * moonDistance
+                );
                 planetGroup.add(moon);
             }
         }
@@ -5202,14 +5214,15 @@ function createNodeSpheres() {
             orbitRadius: orbitRadius,
             orbitAngle: angle,
             orbitTilt: orbitTilt,
-            orbitSpeed: 0.0003 + Math.random() * 0.0008,
-            rotationSpeed: 0.005 + Math.random() * 0.01,
+            orbitSpeed: 0.0003 + seededRandom(node.id, 'orbspd') * 0.0008,
+            rotationSpeed: 0.005 + seededRandom(node.id, 'rotspd') * 0.01,
             planetType: planetType.name,
             size: size
         });
 
         gameMode.scene.add(planetGroup);
         gameMode.nodeMeshes.push(planetGroup);
+        gameMode.nodeIdToMesh.set(node.id, planetGroup);
     });
 }
 
@@ -5222,6 +5235,13 @@ function hashCode(str) {
         hash = hash & hash;
     }
     return hash;
+}
+
+// Seeded random function for deterministic "random" values based on node ID
+function seededRandom(nodeId, seed) {
+    const hash = hashCode(nodeId + seed);
+    // Convert hash to 0-1 range
+    return (Math.abs(hash) % 10000) / 10000;
 }
 
 // Create space elevators between connected planets
@@ -6683,13 +6703,232 @@ function handleGameResize() {
     gameMode.renderer.setSize(width, height);
 }
 
-// Refresh game nodes when network data updates
+// Refresh game nodes when network data updates - INCREMENTAL version
 function refreshGameNodes() {
     if (!gameMode.active) return;
 
-    createNodeSpheres();
-    createSpaceElevators();
+    const allNodes = nodes.get();
+    if (allNodes.length === 0) return;
+
+    const currentNodeIds = new Set(allNodes.map(n => n.id));
+    const existingNodeIds = new Set(gameMode.nodeIdToMesh.keys());
+
+    // Find nodes to add and remove
+    const nodesToAdd = allNodes.filter(n => !existingNodeIds.has(n.id));
+    const nodeIdsToRemove = [...existingNodeIds].filter(id => !currentNodeIds.has(id));
+
+    // Remove deleted nodes
+    nodeIdsToRemove.forEach(nodeId => {
+        const mesh = gameMode.nodeIdToMesh.get(nodeId);
+        if (mesh) {
+            // Clean up mesh
+            while (mesh.children.length > 0) {
+                const child = mesh.children[0];
+                mesh.remove(child);
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            }
+            gameMode.scene.remove(mesh);
+            if (mesh.geometry) mesh.geometry.dispose();
+            if (mesh.material) mesh.material.dispose();
+
+            // Remove from tracking
+            const meshIndex = gameMode.nodeMeshes.indexOf(mesh);
+            if (meshIndex > -1) gameMode.nodeMeshes.splice(meshIndex, 1);
+            gameMode.nodeDataMap.delete(mesh.uuid);
+            gameMode.nodeIdToMesh.delete(nodeId);
+        }
+    });
+
+    // Add new nodes
+    if (nodesToAdd.length > 0) {
+        addNewGameNodes(nodesToAdd);
+    }
+
+    // Update data for existing nodes (packet counts, titles)
+    allNodes.forEach(node => {
+        const mesh = gameMode.nodeIdToMesh.get(node.id);
+        if (mesh) {
+            const data = gameMode.nodeDataMap.get(mesh.uuid);
+            if (data) {
+                const packetCount = extractPacketCount(node.title) || 1;
+                data.packetCount = packetCount;
+                data.title = node.title;
+                data.label = node.label;
+            }
+        }
+    });
+
+    // Only rebuild elevators if nodes changed
+    if (nodesToAdd.length > 0 || nodeIdsToRemove.length > 0) {
+        createSpaceElevators();
+    }
+
     updateGameHUD();
+}
+
+// Add new nodes to game mode without rebuilding everything
+function addNewGameNodes(newNodes) {
+    const allNodes = nodes.get();
+    const nodeCount = allNodes.length;
+    const rings = Math.ceil(Math.sqrt(nodeCount));
+
+    newNodes.forEach(node => {
+        // Find this node's index in the full list for positioning
+        const index = allNodes.findIndex(n => n.id === node.id);
+        if (index === -1) return;
+
+        const ring = Math.floor(index / Math.max(1, Math.ceil(nodeCount / rings)));
+        const positionInRing = index % Math.max(1, Math.ceil(nodeCount / rings));
+        const nodesInRing = Math.ceil(nodeCount / rings);
+
+        const orbitRadius = 25000 + ring * 25000;
+        const angle = (positionInRing / nodesInRing) * Math.PI * 2 + ring * 0.5;
+        const verticalOffset = (seededRandom(node.id, 'voff') - 0.5) * 8000;
+        const orbitTilt = (seededRandom(node.id, 'tilt') - 0.5) * 0.4;
+
+        const packetCount = extractPacketCount(node.title) || 1;
+        const baseSize = 1500;
+        const maxSize = 6000;
+        const size = Math.min(maxSize, baseSize + Math.log10(packetCount + 1) * 1200);
+
+        const planetTypeIndex = hashCode(node.id) % PLANET_TYPES.length;
+        const planetType = PLANET_TYPES[Math.abs(planetTypeIndex)];
+
+        const planetGroup = createPlanetMesh(node.id, size, planetType);
+
+        planetGroup.position.set(
+            Math.cos(angle) * orbitRadius,
+            verticalOffset + Math.sin(angle * 2) * orbitTilt * orbitRadius,
+            Math.sin(angle) * orbitRadius
+        );
+
+        gameMode.nodeDataMap.set(planetGroup.uuid, {
+            id: node.id,
+            label: node.label,
+            title: node.title,
+            packetCount: packetCount,
+            orbitRadius: orbitRadius,
+            orbitAngle: angle,
+            orbitTilt: orbitTilt,
+            orbitSpeed: 0.0003 + seededRandom(node.id, 'orbspd') * 0.0008,
+            rotationSpeed: 0.005 + seededRandom(node.id, 'rotspd') * 0.01,
+            planetType: planetType.name,
+            size: size
+        });
+
+        gameMode.scene.add(planetGroup);
+        gameMode.nodeMeshes.push(planetGroup);
+        gameMode.nodeIdToMesh.set(node.id, planetGroup);
+    });
+}
+
+// Create a planet mesh for a node (extracted helper)
+function createPlanetMesh(nodeId, size, planetType) {
+    const planetGroup = new THREE.Group();
+    const baseColor = planetType.colors[Math.abs(hashCode(nodeId + 'color')) % planetType.colors.length];
+
+    // Main planet body
+    const geometry = new THREE.SphereGeometry(size, 64, 64);
+    const material = new THREE.MeshPhongMaterial({
+        color: baseColor,
+        emissive: baseColor,
+        emissiveIntensity: 0.12,
+        shininess: 40,
+        transparent: false
+    });
+    const planet = new THREE.Mesh(geometry, material);
+    planet.rotation.x = seededRandom(nodeId, 'rotx') * 0.5;
+    planet.rotation.z = seededRandom(nodeId, 'rotz') * 0.3;
+    planetGroup.add(planet);
+
+    // Surface features
+    const featureGeometry = new THREE.SphereGeometry(size * 1.002, 64, 64);
+    const featureColor = new THREE.Color(baseColor).offsetHSL(0.05, 0.1, 0.15);
+    const featureMaterial = new THREE.MeshPhongMaterial({
+        color: featureColor,
+        emissive: featureColor,
+        emissiveIntensity: 0.08,
+        transparent: true,
+        opacity: 0.6,
+        blending: THREE.AdditiveBlending
+    });
+    const features = new THREE.Mesh(featureGeometry, featureMaterial);
+    features.rotation.y = seededRandom(nodeId, 'feat') * Math.PI;
+    planetGroup.add(features);
+
+    // Clouds for atmospheric planets
+    if (planetType.hasAtmosphere && seededRandom(nodeId, 'cloud') > 0.3) {
+        const cloudGeometry = new THREE.SphereGeometry(size * 1.02, 48, 48);
+        const cloudMaterial = new THREE.MeshPhongMaterial({
+            color: 0xffffff,
+            emissive: 0x222222,
+            transparent: true,
+            opacity: 0.25,
+            blending: THREE.NormalBlending
+        });
+        const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
+        clouds.userData.rotationSpeed = 0.0002 + seededRandom(nodeId, 'cloudspd') * 0.0003;
+        planetGroup.add(clouds);
+    }
+
+    // Atmosphere glow
+    if (planetType.hasAtmosphere) {
+        const atmosphereGeometry = new THREE.SphereGeometry(size * 1.15, 32, 32);
+        const atmosphereMaterial = new THREE.MeshBasicMaterial({
+            color: planetType.atmosphereColor,
+            transparent: true,
+            opacity: 0.15,
+            side: THREE.BackSide
+        });
+        planetGroup.add(new THREE.Mesh(atmosphereGeometry, atmosphereMaterial));
+    }
+
+    // Rings
+    const hasRings = planetType.hasRings || (size > 1500 && seededRandom(nodeId, 'rings') > 0.5);
+    if (hasRings) {
+        const ringGeometry = new THREE.RingGeometry(size * 1.4, size * 2.2, 64);
+        const ringMaterial = new THREE.MeshBasicMaterial({
+            color: 0xccbb99,
+            transparent: true,
+            opacity: 0.4,
+            side: THREE.DoubleSide
+        });
+        const rings = new THREE.Mesh(ringGeometry, ringMaterial);
+        rings.rotation.x = Math.PI / 2 + (seededRandom(nodeId, 'ringtilt') - 0.5) * 0.3;
+        planetGroup.add(rings);
+    }
+
+    // Moons
+    if (size > 200 && seededRandom(nodeId, 'hasmoon') > 0.4) {
+        const moonCount = Math.floor(seededRandom(nodeId, 'moonct') * 4) + 1;
+        for (let m = 0; m < moonCount; m++) {
+            const moonSize = size * (0.08 + seededRandom(nodeId, 'moonsz' + m) * 0.12);
+            const moonDistance = size * (1.4 + m * 0.5 + seededRandom(nodeId, 'moondst' + m) * 0.3);
+            const moonGeometry = new THREE.SphereGeometry(moonSize, 24, 24);
+            const moonMaterial = new THREE.MeshPhongMaterial({
+                color: 0x999999,
+                emissive: 0x333333,
+                emissiveIntensity: 0.15
+            });
+            const moon = new THREE.Mesh(moonGeometry, moonMaterial);
+            moon.userData.moonOrbitRadius = moonDistance;
+            moon.userData.moonOrbitSpeed = 0.008 + seededRandom(nodeId, 'moonspd' + m) * 0.012;
+            // Spread moons evenly around planet, plus small random offset
+            const baseAngle = (m / moonCount) * Math.PI * 2;
+            const randomOffset = (seededRandom(nodeId, 'moonang' + m) - 0.5) * 0.5;
+            moon.userData.moonOrbitAngle = baseAngle + randomOffset;
+            // Position moon using its orbit angle
+            moon.position.set(
+                Math.cos(moon.userData.moonOrbitAngle) * moonDistance,
+                0,
+                Math.sin(moon.userData.moonOrbitAngle) * moonDistance
+            );
+            planetGroup.add(moon);
+        }
+    }
+
+    return planetGroup;
 }
 
 // Start the application when DOM is ready

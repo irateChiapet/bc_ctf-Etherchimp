@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -27,6 +28,7 @@ type Server struct {
 	server      *http.Server
 	hub         *Hub
 	rateLimiter *RateLimiter
+	hostnames   []string
 }
 
 // ServerConfig holds server configuration options
@@ -36,6 +38,7 @@ type ServerConfig struct {
 	RateLimitConfig RateLimitConfig
 	StreamMgr       *stream.Manager
 	ReplayOnlyMode  bool
+	Hostnames       []string // Additional hostnames/IPs for TLS certificate
 }
 
 // DefaultServerConfig returns sensible defaults
@@ -63,6 +66,7 @@ func NewServerWithConfig(config ServerConfig, graphMgr *graph.Manager) *Server {
 		streamMgr:   config.StreamMgr,
 		hub:         hub,
 		rateLimiter: NewRateLimiter(config.RateLimitConfig),
+		hostnames:   config.Hostnames,
 	}
 }
 
@@ -80,7 +84,7 @@ func (s *Server) Start() error {
 
 	if _, err := os.Stat(certFile); os.IsNotExist(err) {
 		log.Println("Generating self-signed TLS certificate...")
-		if err := generateSelfSignedCert(certFile, keyFile); err != nil {
+		if err := generateSelfSignedCert(certFile, keyFile, s.hostnames); err != nil {
 			return fmt.Errorf("failed to generate certificate: %v", err)
 		}
 		log.Println("Certificate generated successfully")
@@ -125,7 +129,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // generateSelfSignedCert creates a self-signed TLS certificate
-func generateSelfSignedCert(certFile, keyFile string) error {
+func generateSelfSignedCert(certFile, keyFile string, hostnames []string) error {
 	// Generate private key
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -141,18 +145,41 @@ func generateSelfSignedCert(certFile, keyFile string) error {
 		return err
 	}
 
+	// Build DNS names and IP addresses from hostnames
+	dnsNames := []string{"localhost"}
+	var ipAddresses []net.IP
+
+	for _, h := range hostnames {
+		if ip := net.ParseIP(h); ip != nil {
+			ipAddresses = append(ipAddresses, ip)
+		} else {
+			dnsNames = append(dnsNames, h)
+		}
+	}
+
+	// Determine CommonName - use first hostname if provided, otherwise localhost
+	commonName := "localhost"
+	if len(hostnames) > 0 {
+		commonName = hostnames[0]
+	}
+
+	if len(hostnames) > 0 {
+		log.Printf("Certificate will include: DNSNames=%v, IPs=%v", dnsNames, ipAddresses)
+	}
+
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"go-etherape"},
-			CommonName:   "localhost",
+			CommonName:   commonName,
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
+		DNSNames:              dnsNames,
+		IPAddresses:           ipAddresses,
 	}
 
 	// Create certificate

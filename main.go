@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +35,10 @@ func main() {
 	sshPrivateKey := flag.String("pkey", "", "Path to SSH private key file (for key-based authentication)")
 	sshUser := flag.String("user", "", "SSH username")
 	sshPass := flag.String("pass", "", "SSH password (for password-based authentication)")
+
+	// TLS certificate flags
+	var hostnames flagSlice
+	flag.Var(&hostnames, "hostname", "Hostname or IP for TLS certificate (can be specified multiple times)")
 
 	// Rate limiting flags
 	rateLimit := flag.Float64("rate-limit", 10.0, "API requests per second per client")
@@ -363,6 +368,7 @@ func main() {
 		},
 		StreamMgr:      streamMgr,
 		ReplayOnlyMode: replayOnlyMode,
+		Hostnames:      hostnames,
 	}
 
 	// Initialize and start HTTPS server
@@ -461,4 +467,16 @@ func buildLogRotateConfig(maxSize string, maxBackups, maxAge int, compress bool,
 	}
 
 	return config
+}
+
+// flagSlice implements flag.Value for collecting multiple flag values
+type flagSlice []string
+
+func (f *flagSlice) String() string {
+	return strings.Join(*f, ", ")
+}
+
+func (f *flagSlice) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }
