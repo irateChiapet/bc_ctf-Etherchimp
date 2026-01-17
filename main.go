@@ -29,6 +29,12 @@ func main() {
 	daemonCmd := flag.String("daemon", "", "Daemon command: start, stop, pause, resume, status, rotate-logs, log-status, cleanup-logs")
 	background := flag.Bool("background", false, "Run in background (internal use)")
 
+	// SSH capture flags
+	sshHost := flag.String("ssh", "", "SSH host for remote capture (host:port format, e.g., 192.168.1.1:22)")
+	sshPrivateKey := flag.String("pkey", "", "Path to SSH private key file (for key-based authentication)")
+	sshUser := flag.String("user", "", "SSH username")
+	sshPass := flag.String("pass", "", "SSH password (for password-based authentication)")
+
 	// Rate limiting flags
 	rateLimit := flag.Float64("rate-limit", 10.0, "API requests per second per client")
 	rateBurst := flag.Int("rate-burst", 50, "Maximum burst size for rate limiting")
@@ -72,13 +78,19 @@ func main() {
 
 	// Determine mode based on flags
 	replayOnlyMode := *replayFile != ""
+	sshCaptureMode := *sshHost != ""
 
 	// Validate flags based on mode
 	if replayOnlyMode {
-		// Replay-only mode: -f is specified, -i is not allowed
+		// Replay-only mode: -f is specified, -i and -ssh are not allowed
 		if *iface != "" {
 			fmt.Println("Error: Cannot use -i (interface) with -f (replay file)")
 			fmt.Println("  -f enables replay-only mode which does not capture from interfaces")
+			os.Exit(1)
+		}
+		if sshCaptureMode {
+			fmt.Println("Error: Cannot use -ssh with -f (replay file)")
+			fmt.Println("  -f enables replay-only mode which does not capture from remote hosts")
 			os.Exit(1)
 		}
 
@@ -86,12 +98,38 @@ func main() {
 		if _, err := os.Stat(*replayFile); os.IsNotExist(err) {
 			log.Fatalf("Replay file not found: %s", *replayFile)
 		}
-	} else {
-		// Capture mode: -i is required
+	} else if sshCaptureMode {
+		// SSH capture mode: validate SSH flags
 		if *iface == "" {
-			fmt.Println("Error: Either -i (interface) or -f (replay file) is required")
+			fmt.Println("Error: -i (interface) is required for SSH capture mode")
+			fmt.Println("  Specify the remote interface to capture from")
+			os.Exit(1)
+		}
+		if *sshUser == "" {
+			fmt.Println("Error: -user is required for SSH capture mode")
+			os.Exit(1)
+		}
+		if *sshPrivateKey == "" && *sshPass == "" {
+			fmt.Println("Error: Either -pkey (private key) or -pass (password) is required for SSH capture")
+			os.Exit(1)
+		}
+		if *sshPrivateKey != "" && *sshPass != "" {
+			fmt.Println("Error: Cannot use both -pkey and -pass. Choose one authentication method")
+			os.Exit(1)
+		}
+		// Validate private key file exists if specified
+		if *sshPrivateKey != "" {
+			if _, err := os.Stat(*sshPrivateKey); os.IsNotExist(err) {
+				log.Fatalf("SSH private key file not found: %s", *sshPrivateKey)
+			}
+		}
+	} else {
+		// Local capture mode: -i is required
+		if *iface == "" {
+			fmt.Println("Error: One of the following is required:")
 			fmt.Println("  -i: Network interface for live capture mode")
 			fmt.Println("  -f: Pcap file for replay-only mode")
+			fmt.Println("  -ssh: SSH host for remote capture mode (requires -i, -user, and -pkey or -pass)")
 			flag.Usage()
 			os.Exit(1)
 		}
@@ -155,8 +193,93 @@ func main() {
 		}
 
 		log.Printf("  Stream tracking: enabled")
+	} else if sshCaptureMode {
+		// SSH CAPTURE MODE
+		log.Printf("Starting go-etherape in SSH CAPTURE mode...")
+		log.Printf("  SSH Host: %s", *sshHost)
+		log.Printf("  Remote Interface: %s", *iface)
+		log.Printf("  SSH User: %s", *sshUser)
+		if *sshPrivateKey != "" {
+			log.Printf("  Auth: Public Key (%s)", *sshPrivateKey)
+		} else {
+			log.Printf("  Auth: Password")
+		}
+		log.Printf("  Server: https://%s:%d", *bindIP, *port)
+		log.Printf("  Stream tracking: enabled")
+
+		// Start DNS resolver
+		dnsResolver := graph.NewDNSResolver()
+		dnsResolver.Start(ctx)
+
+		// Start decay manager
+		decayMgr := graph.NewDecayManager(graphMgr, 60) // 60 second timeout
+		decayMgr.Start(ctx)
+
+		// Initialize SSH packet capture
+		packetChan := make(chan *capture.PacketInfo, 1000)
+		sshConfig := capture.SSHCaptureConfig{
+			Host:       *sshHost,
+			Interface:  *iface,
+			PrivateKey: *sshPrivateKey,
+			Username:   *sshUser,
+			Password:   *sshPass,
+		}
+		sshCaptureEngine, err := capture.NewSSHCapture(sshConfig, packetChan)
+		if err != nil {
+			log.Fatalf("Failed to initialize SSH capture: %v", err)
+		}
+
+		// Setup signal handlers for pause/resume
+		pauseSigChan := make(chan os.Signal, 1)
+		resumeSigChan := make(chan os.Signal, 1)
+		signal.Notify(pauseSigChan, syscall.SIGUSR1)
+		signal.Notify(resumeSigChan, syscall.SIGUSR2)
+
+		// Handle pause/resume signals
+		go func() {
+			for {
+				select {
+				case <-pauseSigChan:
+					log.Println("Received pause signal")
+					sshCaptureEngine.Pause()
+				case <-resumeSigChan:
+					log.Println("Received resume signal")
+					sshCaptureEngine.Resume()
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		// Start SSH packet capture
+		go sshCaptureEngine.Start(ctx)
+
+		// Process packets and update graph
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case pkt := <-packetChan:
+					// Resolve hostnames asynchronously
+					srcHostname := dnsResolver.Resolve(pkt.SrcIP)
+					dstHostname := dnsResolver.Resolve(pkt.DstIP)
+
+					// Update graph
+					graphMgr.AddOrUpdateNode(pkt.SrcIP, srcHostname, pkt.Length)
+					graphMgr.AddOrUpdateNode(pkt.DstIP, dstHostname, pkt.Length)
+					graphMgr.AddOrUpdateEdge(pkt.SrcIP, pkt.DstIP, pkt.Protocol, pkt.Length)
+
+					// Store packet with payload for inspection
+					graphMgr.AddPacket(pkt)
+
+					// Add packet to stream tracking
+					streamMgr.AddPacket(pkt)
+				}
+			}
+		}()
 	} else {
-		// CAPTURE MODE (original behavior)
+		// LOCAL CAPTURE MODE (original behavior)
 		log.Printf("Starting go-etherape...")
 		log.Printf("  Interface: %s", *iface)
 		log.Printf("  Server: https://%s:%d", *bindIP, *port)

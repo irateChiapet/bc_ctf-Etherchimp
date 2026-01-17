@@ -6,6 +6,7 @@
     <title>EtherChimp</title>
     <link rel="stylesheet" href="/static/styles.css">
     <script src="https://unpkg.com/vis-network@9.1.6/dist/vis-network.min.js"></script>
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 </head>
 <body>
     <script>
@@ -324,6 +325,21 @@
                         <span class="nav-text">Chimpy Mode</span>
                     </button>
                 </li>
+
+                <!-- Game Mode -->
+                <li class="nav-item" data-tooltip="Game Mode">
+                    <button class="nav-link" id="gameModeToggle">
+                        <svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <line x1="12" y1="2" x2="12" y2="6"></line>
+                            <line x1="12" y1="18" x2="12" y2="22"></line>
+                            <line x1="2" y1="12" x2="6" y2="12"></line>
+                            <line x1="18" y1="12" x2="22" y2="12"></line>
+                        </svg>
+                        <span class="nav-text">Game Mode</span>
+                    </button>
+                </li>
             </ul>
         </nav>
 
@@ -465,6 +481,121 @@
                 <div class="chimpy-hex-dump" id="chimpyHexDump"></div>
             </div>
         </div>
+    </div>
+
+    <!-- Game Mode Elements -->
+    <div class="game-mode-container" id="gameModeContainer" style="display: none;">
+        <canvas id="gameCanvas"></canvas>
+        <!-- Warp tunnel effect -->
+        <div class="warp-tunnel" id="warpTunnel"></div>
+        <!-- Speed lines container -->
+        <div class="speed-lines" id="speedLines"></div>
+        <!-- Cockpit HUD - Shodan 2000 Style -->
+        <div class="cockpit-hud" id="cockpitHud">
+            <!-- Scanline overlay -->
+            <div class="hud-scanlines"></div>
+
+            <!-- Corner brackets -->
+            <div class="hud-corner hud-corner-tl"></div>
+            <div class="hud-corner hud-corner-tr"></div>
+            <div class="hud-corner hud-corner-bl"></div>
+            <div class="hud-corner hud-corner-br"></div>
+
+            <!-- Center crosshair -->
+            <div class="crosshair" id="crosshair"></div>
+            <div class="targeting-reticle" id="targetingReticle">
+                <div class="reticle-ring"></div>
+                <div class="reticle-cross"></div>
+            </div>
+
+            <!-- Floating hostname label for targeted planet -->
+            <div class="planet-hostname-label" id="planetHostnameLabel">
+                <span class="hostname-text" id="hostnameText"></span>
+                <span class="hostname-ip" id="hostnameIp"></span>
+            </div>
+
+            <!-- Left panel -->
+            <div class="hud-panel hud-panel-left">
+                <div class="hud-panel-header">// SYSTEM</div>
+                <div class="hud-panel-content">
+                    <div class="hud-stat">
+                        <span class="hud-stat-label">NODES</span>
+                        <span class="hud-stat-value" id="gameNodeCount">0</span>
+                    </div>
+                    <div class="hud-stat">
+                        <span class="hud-stat-label">PACKETS</span>
+                        <span class="hud-stat-value" id="gamePacketCount">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right panel -->
+            <div class="hud-panel hud-panel-right">
+                <div class="hud-panel-header">// TARGET</div>
+                <div class="hud-panel-content" id="targetInfo">
+                    <div class="hud-stat">
+                        <span class="hud-stat-label">HOST</span>
+                        <span class="hud-stat-value" id="targetIp">---</span>
+                    </div>
+                    <div class="hud-stat">
+                        <span class="hud-stat-label">DATA</span>
+                        <span class="hud-stat-value" id="targetPackets">---</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bottom bar -->
+            <div class="hud-bottom-bar">
+                <div class="hud-velocity">
+                    <span class="hud-velocity-label">VEL</span>
+                    <div class="hud-velocity-bar">
+                        <div class="hud-velocity-fill" id="speedFill"></div>
+                    </div>
+                    <span class="hud-velocity-value" id="speedValue">0</span>
+                </div>
+            </div>
+
+            <!-- TCP Stream Terminal Display -->
+            <div class="stream-terminal" id="streamTerminal">
+                <div class="stream-terminal-header">
+                    <span class="stream-terminal-title" id="streamTerminalTitle">// TCP STREAM</span>
+                    <span class="stream-terminal-status" id="streamTerminalStatus"></span>
+                </div>
+                <div class="stream-terminal-content" id="streamTerminalContent"></div>
+            </div>
+
+            <!-- Warp Drive Search Overlay -->
+            <div class="warp-drive-overlay" id="warpDriveOverlay">
+                <div class="warp-drive-container">
+                    <div class="warp-drive-header">
+                        <span class="warp-drive-title">// WARP DRIVE NAVIGATION</span>
+                        <span class="warp-drive-status" id="warpDriveStatus">READY</span>
+                    </div>
+                    <div class="warp-drive-search">
+                        <span class="warp-search-prefix">&gt;</span>
+                        <input type="text" id="warpSearchInput" placeholder="Search hostname, IP, MAC, or packet data..." autocomplete="off" />
+                    </div>
+                    <div class="warp-drive-results" id="warpDriveResults"></div>
+                    <div class="warp-drive-hint">Press ESC to cancel | Enter to select | Arrow keys to navigate</div>
+                </div>
+            </div>
+
+            <!-- Warp Effect Overlay -->
+            <div class="warp-effect-overlay" id="warpEffectOverlay">
+                <div class="warp-streaks" id="warpStreaks"></div>
+                <div class="warp-destination" id="warpDestination"></div>
+            </div>
+
+            <!-- Hidden elements for compatibility -->
+            <div class="cockpit-frame" style="display:none;"></div>
+            <div class="cockpit-stats" id="cockpitStats" style="display:none;"></div>
+            <div class="speed-indicator" id="speedIndicator" style="display:none;"></div>
+        </div>
+        <!-- Instructions overlay -->
+        <div class="game-instructions" id="gameInstructions">
+            <div class="instruction-text">WASD move | Space up | C down | Shift boost | Mouse aim | Click scan | / warp drive | ESC exit</div>
+        </div>
+        <div id="planetInfoScreen"></div>
     </div>
 
     <script src="/static/app.js"></script>

@@ -44,6 +44,9 @@ const nodeStateCache = new Map(); // id -> { packetCount, byteCount, colorTier }
 const edgeStateCache = new Map(); // id -> { packetCount, byteCount }
 let lastPacketPanelRefresh = 0;
 
+// Physics damping control for burst node additions
+let physicsDampingTimeout = null;
+
 
 // Replay mode state
 let replayMode = {
@@ -67,6 +70,7 @@ function init() {
     setupTheme();
     setupClusterLayout();
     setupChimpyMode();
+    setupGameMode();
     setupReplayMode();
     setupStreams();
     connectWebSocket();
@@ -1559,12 +1563,18 @@ function connectWebSocket() {
     ws = new WebSocket(wsUrl);
 
     ws.onopen = function() {
+        console.log('WebSocket connected');
         updateConnectionStatus('Connected', true);
     };
 
     ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        throttledUpdateGraph(data);
+        console.log('WebSocket message received, length:', event.data.length);
+        try {
+            const data = JSON.parse(event.data);
+            throttledUpdateGraph(data);
+        } catch (e) {
+            console.error('Error processing WebSocket message:', e);
+        }
     };
 
     ws.onerror = function(error) {
@@ -1676,6 +1686,14 @@ function getColorTier(packetCount, lowThreshold, mediumThreshold) {
 }
 
 function updateGraph(data) {
+    console.log('updateGraph called with', data.nodes?.length, 'nodes and', data.edges?.length, 'edges');
+
+    // Safety check for missing data
+    if (!data || !data.nodes || !data.edges) {
+        console.error('Invalid data received:', data);
+        return;
+    }
+
     // Performance monitoring
     const totalNodes = data.nodes.length;
     const totalEdges = data.edges.length;
@@ -1701,6 +1719,8 @@ function updateGraph(data) {
 
     // DELTA UPDATE: Only update nodes that actually changed
     const nodeUpdates = [];
+    const newNodeCount = sortedNodes.filter(n => !currentNodeIds.has(n.id)).length;
+
     for (const node of sortedNodes) {
         const colorTier = getColorTier(node.packetCount, lowThreshold, mediumThreshold);
         const cached = nodeStateCache.get(node.id);
@@ -1727,6 +1747,36 @@ function updateGraph(data) {
                 packetCount: node.packetCount,
                 byteCount: node.byteCount
             };
+
+            // For new nodes, find initial position near connected neighbor to prevent explosion
+            if (isNew && network) {
+                const connectedEdge = data.edges.find(e => e.from === node.id || e.to === node.id);
+                if (connectedEdge) {
+                    const neighborId = connectedEdge.from === node.id ? connectedEdge.to : connectedEdge.from;
+                    // Only get position if neighbor exists in the network
+                    if (nodes.get(neighborId)) {
+                        try {
+                            const neighborPos = network.getPosition(neighborId);
+                            if (neighborPos && neighborPos.x !== undefined) {
+                                // Position near neighbor with small random offset
+                                const angle = Math.random() * Math.PI * 2;
+                                const distance = 100 + Math.random() * 100;
+                                nodeData.x = neighborPos.x + Math.cos(angle) * distance;
+                                nodeData.y = neighborPos.y + Math.sin(angle) * distance;
+                            }
+                        } catch (e) {
+                            // Neighbor position not available, will use default positioning
+                        }
+                    }
+                } else {
+                    // No connected neighbor - position in a spread-out ring around center
+                    const angle = Math.random() * Math.PI * 2;
+                    const distance = 200 + Math.random() * 300;
+                    nodeData.x = Math.cos(angle) * distance;
+                    nodeData.y = Math.sin(angle) * distance;
+                }
+            }
+
             nodeUpdates.push(nodeData);
         }
 
@@ -1744,6 +1794,40 @@ function updateGraph(data) {
     // Only call update if there are actual changes
     if (nodeUpdates.length > 0) {
         nodes.update(nodeUpdates);
+
+        // When many new nodes arrive at once (like during nmap scan), temporarily increase damping
+        // to prevent explosive spreading, then restore normal physics after settling
+        if (newNodeCount >= 5 && network) {
+            const currentLayout = localStorage.getItem('clusterLayout') || 'force';
+            if (currentLayout === 'force') {
+                // Apply high damping immediately
+                network.setOptions({
+                    physics: {
+                        barnesHut: {
+                            damping: 0.5,  // High damping for smooth settling
+                            springConstant: 0.02  // Stiffer springs to hold together
+                        }
+                    }
+                });
+                // Clear any existing timeout and reset the timer
+                // This debounces the restore so it only happens after activity stops
+                if (physicsDampingTimeout) {
+                    clearTimeout(physicsDampingTimeout);
+                }
+                physicsDampingTimeout = setTimeout(() => {
+                    if (network) {
+                        const tier = getPerformanceTier(nodes.getIds().length);
+                        const physicsSettings = getPhysicsSettings(tier);
+                        network.setOptions({
+                            physics: {
+                                barnesHut: physicsSettings.barnesHut
+                            }
+                        });
+                    }
+                    physicsDampingTimeout = null;
+                }, 2000);
+            }
+        }
     }
 
 
@@ -1833,6 +1917,11 @@ function updateGraph(data) {
 
     // Update statistics
     updateStatistics(data.nodes.length, data.edges.length, totalPackets);
+
+    // Update game mode nodes if active and there were changes
+    if (gameMode.active && (nodeUpdates.length > 0 || edgeUpdates.length > 0 || nodesToRemove.length > 0 || edgesToRemove.length > 0)) {
+        refreshGameNodes();
+    }
 }
 
 // Format node label
@@ -3448,6 +3537,3159 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = String(text);
     return div.innerHTML;
+}
+
+// ==================== Game Mode Implementation ====================
+
+// Game mode state
+const gameMode = {
+    active: false,
+    scene: null,
+    camera: null,
+    renderer: null,
+    raycaster: null,
+    mouse: new THREE.Vector2(),
+    nodeMeshes: [],
+    nodeDataMap: new Map(), // mesh.uuid -> node data
+    stars: null,
+    nebulae: [],
+    ambientDust: null,
+    asteroids: [],
+    animationId: null,
+    moveForward: false,
+    moveBackward: false,
+    moveLeft: false,
+    moveRight: false,
+    moveUp: false,
+    moveDown: false,
+    velocity: new THREE.Vector3(),
+    currentSpeed: 0,
+    euler: new THREE.Euler(0, 0, 0, 'YXZ'),
+    PI_2: Math.PI / 2,
+    lockedTarget: null,
+    laserCooldown: false,
+    speedLinesActive: false,
+    autoLockPosition: null,
+    boosting: false,
+    spaceElevators: [],
+    elevatorParticles: [],
+    warpDriveActive: false,
+    warpSelectedIndex: 0,
+    warpResults: [],
+    isWarping: false
+};
+
+// Setup game mode
+function setupGameMode() {
+    const gameModeToggle = document.getElementById('gameModeToggle');
+
+    if (gameModeToggle) {
+        gameModeToggle.addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleGameMode();
+        });
+    }
+}
+
+// Toggle game mode on/off
+function toggleGameMode() {
+    const container = document.getElementById('gameModeContainer');
+    const toggle = document.getElementById('gameModeToggle');
+
+    if (gameMode.active) {
+        // Deactivate game mode
+        gameMode.active = false;
+        container.style.display = 'none';
+        toggle.classList.remove('game-active');
+
+        // Stop animation loop
+        if (gameMode.animationId) {
+            cancelAnimationFrame(gameMode.animationId);
+            gameMode.animationId = null;
+        }
+
+        // Cleanup space elevators first (before scene disposal)
+        gameMode.spaceElevators.forEach(elevator => {
+            if (elevator.line) {
+                gameMode.scene.remove(elevator.line);
+                if (elevator.line.geometry) elevator.line.geometry.dispose();
+                if (elevator.line.material) elevator.line.material.dispose();
+            }
+            if (elevator.glow) {
+                gameMode.scene.remove(elevator.glow);
+                if (elevator.glow.geometry) elevator.glow.geometry.dispose();
+                if (elevator.glow.material) elevator.glow.material.dispose();
+            }
+            if (elevator.particles) {
+                gameMode.scene.remove(elevator.particles);
+                if (elevator.particles.geometry) elevator.particles.geometry.dispose();
+                if (elevator.particles.material) elevator.particles.material.dispose();
+            }
+        });
+        gameMode.spaceElevators = [];
+
+        // Cleanup node meshes
+        gameMode.nodeMeshes.forEach(mesh => {
+            if (mesh.children) {
+                mesh.children.forEach(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) child.material.dispose();
+                });
+            }
+            if (mesh.geometry) mesh.geometry.dispose();
+            if (mesh.material) mesh.material.dispose();
+            gameMode.scene.remove(mesh);
+        });
+        gameMode.nodeMeshes = [];
+        gameMode.nodeDataMap.clear();
+
+        // Cleanup nebulae
+        gameMode.nebulae.forEach(nebula => {
+            if (nebula.geometry) nebula.geometry.dispose();
+            if (nebula.material) nebula.material.dispose();
+            gameMode.scene.remove(nebula);
+        });
+        gameMode.nebulae = [];
+
+        // Cleanup stars
+        if (gameMode.stars) {
+            if (gameMode.stars.geometry) gameMode.stars.geometry.dispose();
+            if (gameMode.stars.material) gameMode.stars.material.dispose();
+            gameMode.scene.remove(gameMode.stars);
+            gameMode.stars = null;
+        }
+
+        // Cleanup ambient dust
+        if (gameMode.ambientDust) {
+            if (gameMode.ambientDust.geometry) gameMode.ambientDust.geometry.dispose();
+            if (gameMode.ambientDust.material) gameMode.ambientDust.material.dispose();
+            gameMode.scene.remove(gameMode.ambientDust);
+            gameMode.ambientDust = null;
+        }
+
+        // Cleanup sun flares
+        if (gameMode.sunFlares) {
+            if (gameMode.sunFlares.geometry) gameMode.sunFlares.geometry.dispose();
+            if (gameMode.sunFlares.material) gameMode.sunFlares.material.dispose();
+            gameMode.scene.remove(gameMode.sunFlares);
+            gameMode.sunFlares = null;
+        }
+
+        // Cleanup shooting star
+        if (gameMode.shootingStar) {
+            if (gameMode.shootingStar.mesh) {
+                if (gameMode.shootingStar.mesh.geometry) gameMode.shootingStar.mesh.geometry.dispose();
+                if (gameMode.shootingStar.mesh.material) gameMode.shootingStar.mesh.material.dispose();
+                gameMode.scene.remove(gameMode.shootingStar.mesh);
+            }
+            gameMode.shootingStar = null;
+        }
+
+        // Clear all remaining scene children
+        while (gameMode.scene && gameMode.scene.children.length > 0) {
+            const child = gameMode.scene.children[0];
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+                if (Array.isArray(child.material)) {
+                    child.material.forEach(m => m.dispose());
+                } else {
+                    child.material.dispose();
+                }
+            }
+            gameMode.scene.remove(child);
+        }
+
+        // Cleanup Three.js renderer
+        if (gameMode.renderer) {
+            gameMode.renderer.dispose();
+            gameMode.renderer = null;
+        }
+
+        // Clear scene and camera references
+        gameMode.scene = null;
+        gameMode.camera = null;
+        gameMode.raycaster = null;
+        gameMode.starTwinkleData = null;
+        gameMode.asteroids = [];
+        gameMode.elevatorParticles = [];
+        gameMode.warpResults = [];
+        gameMode.warpSelectedIndex = 0;
+
+        // Reset movement state
+        gameMode.moveForward = false;
+        gameMode.moveBackward = false;
+        gameMode.moveLeft = false;
+        gameMode.moveRight = false;
+        gameMode.moveUp = false;
+        gameMode.moveDown = false;
+        gameMode.boosting = false;
+        gameMode.currentSpeed = 0;
+        gameMode.velocity = new THREE.Vector3();
+        gameMode.euler = new THREE.Euler(0, 0, 0, 'YXZ');
+        gameMode.lockedTarget = null;
+        gameMode.laserCooldown = false;
+        gameMode.autoLockPosition = null;
+
+        // Close warp drive if open
+        if (gameMode.warpDriveActive) {
+            closeWarpDrive();
+        }
+        gameMode.isWarping = false;
+
+        // Hide HUD elements
+        const cockpitHud = document.getElementById('cockpitHud');
+        const targetingReticle = document.getElementById('targetingReticle');
+        const crosshairEl = document.getElementById('crosshair');
+        if (cockpitHud) cockpitHud.style.display = 'none';
+        if (targetingReticle) targetingReticle.style.display = 'none';
+        if (crosshairEl) crosshairEl.style.display = 'none';
+
+        // Remove resize listener
+        window.removeEventListener('resize', handleGameResize);
+
+        // Unlock pointer
+        document.exitPointerLock();
+
+        // Remove event listeners
+        document.removeEventListener('keydown', handleGameKeyDown);
+        document.removeEventListener('keyup', handleGameKeyUp);
+        document.removeEventListener('mousemove', handleGameMouseMove);
+        document.removeEventListener('click', handleGameClick);
+
+    } else {
+        // Activate game mode
+        gameMode.active = true;
+        container.style.display = 'block';
+        toggle.classList.add('game-active');
+
+        // Cancel any lingering animation frame from previous session
+        if (gameMode.animationId) {
+            cancelAnimationFrame(gameMode.animationId);
+            gameMode.animationId = null;
+        }
+
+        // Reset movement and camera state for fresh start
+        gameMode.euler = new THREE.Euler(0, 0, 0, 'YXZ');
+        gameMode.velocity = new THREE.Vector3();
+        gameMode.currentSpeed = 0;
+        gameMode.moveForward = false;
+        gameMode.moveBackward = false;
+        gameMode.moveLeft = false;
+        gameMode.moveRight = false;
+        gameMode.moveUp = false;
+        gameMode.moveDown = false;
+        gameMode.boosting = false;
+        gameMode.lockedTarget = null;
+
+        // Initialize Three.js scene
+        initGameScene();
+
+        // Add event listeners
+        document.addEventListener('keydown', handleGameKeyDown);
+        document.addEventListener('keyup', handleGameKeyUp);
+        document.addEventListener('mousemove', handleGameMouseMove);
+        document.addEventListener('click', handleGameClick);
+
+        // Request pointer lock
+        const canvas = document.getElementById('gameCanvas');
+        canvas.requestPointerLock();
+
+        // Start animation loop
+        animateGameScene();
+    }
+}
+
+function createCyberpunkCockpit() {
+    // Minimal 3D cockpit - most HUD elements are CSS overlays
+    const cockpit = new THREE.Group();
+
+    const glowMaterial = new THREE.MeshBasicMaterial({
+        color: 0x00ffcc,
+        transparent: true,
+        opacity: 0.6
+    });
+
+    // Just subtle 3D frame hints at the very edges
+    const frameGeom = new THREE.BoxGeometry(0.05, 8, 0.05);
+
+    // Far corner accents only
+    const leftFrame = new THREE.Mesh(frameGeom, glowMaterial);
+    leftFrame.position.set(-12, 0, -15);
+    cockpit.add(leftFrame);
+
+    const rightFrame = new THREE.Mesh(frameGeom, glowMaterial);
+    rightFrame.position.set(12, 0, -15);
+    cockpit.add(rightFrame);
+
+    return cockpit;
+}
+
+// Initialize the Three.js scene
+function initGameScene() {
+    const oldCanvas = document.getElementById('gameCanvas');
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    // Replace canvas to ensure clean WebGL context
+    const newCanvas = document.createElement('canvas');
+    newCanvas.id = 'gameCanvas';
+    newCanvas.width = width;
+    newCanvas.height = height;
+    oldCanvas.parentNode.replaceChild(newCanvas, oldCanvas);
+    const canvas = newCanvas;
+
+    // Create scene
+    gameMode.scene = new THREE.Scene();
+    gameMode.scene.background = new THREE.Color(0x000208);
+    gameMode.scene.fog = new THREE.FogExp2(0x000510, 0.000003); // Reduced fog for better visibility
+
+    // Create camera
+    gameMode.camera = new THREE.PerspectiveCamera(75, width / height, 10, 600000);
+    gameMode.camera.position.set(0, 5000, 35000);
+    const cockpit = createCyberpunkCockpit();
+    gameMode.camera.add(cockpit);
+    gameMode.scene.add(gameMode.camera);
+
+    // Create renderer with fresh canvas
+    gameMode.renderer = new THREE.WebGLRenderer({
+        canvas: canvas,
+        antialias: true,
+        alpha: false,
+        powerPreference: 'high-performance'
+    });
+    gameMode.renderer.setSize(width, height);
+    gameMode.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    document.getElementById('cockpitHud').style.display = 'block';
+    document.getElementById('targetingReticle').style.display = 'block';
+    document.getElementById('crosshair').style.display = 'block';
+    document.querySelector('.cockpit-frame').style.display = 'none';
+    document.getElementById('cockpitStats').style.display = 'none';
+
+
+    // Create raycaster for targeting
+    gameMode.raycaster = new THREE.Raycaster();
+    gameMode.raycaster.far = 20000;
+
+    // Create space atmosphere layers (back to front)
+    createGalacticPlane();      // Milky Way band
+    createNebulae();            // Colorful nebulae
+    createCosmicDust();         // Dark dust lanes
+    createStarfield();          // Multi-layer stars
+    createDistantGalaxies();    // Spiral galaxies
+
+    // Create sun (central light source)
+    createSun();
+
+    // Create asteroid belt
+    createAsteroidBelt();
+
+    // Create ambient dust near camera
+    createAmbientDust();
+
+    // Add ambient light
+    const ambientLight = new THREE.AmbientLight(0x334466, 0.6);
+    gameMode.scene.add(ambientLight);
+
+    // Add directional light for better planet shading
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(100, 100, 100);
+    gameMode.scene.add(dirLight);
+
+    // Create nodes as planets
+    createNodeSpheres();
+
+    // Create space elevators between connected planets
+    createSpaceElevators();
+
+    // Initialize speed lines
+    initSpeedLines();
+
+    // Update HUD stats
+    updateGameHUD();
+
+    // Handle window resize
+    window.addEventListener('resize', handleGameResize);
+}
+
+// Create nebulae for space atmosphere - vast and immersive
+function createNebulae() {
+    const nebulaColors = [
+        { r: 0.6, g: 0.1, b: 0.8 },  // Deep Purple
+        { r: 0.1, g: 0.5, b: 0.8 },  // Cosmic Blue
+        { r: 0.8, g: 0.2, b: 0.5 },  // Magenta/Pink
+        { r: 0.1, g: 0.7, b: 0.6 },  // Teal/Cyan
+        { r: 0.7, g: 0.5, b: 0.1 },  // Gold/Orange
+        { r: 0.4, g: 0.1, b: 0.6 },  // Violet
+        { r: 0.1, g: 0.3, b: 0.5 },  // Deep Blue
+        { r: 0.6, g: 0.1, b: 0.4 },  // Crimson
+        { r: 0.2, g: 0.8, b: 0.3 },  // Emerald
+        { r: 0.9, g: 0.4, b: 0.1 },  // Flame Orange
+    ];
+
+    // Create massive nebula clouds spanning the scene
+    for (let n = 0; n < 25; n++) {
+        const particleCount = 6000;
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+
+        // Spread nebulae across vast distances
+        const nebulaX = (Math.random() - 0.5) * 180000;
+        const nebulaY = (Math.random() - 0.5) * 80000;
+        const nebulaZ = (Math.random() - 0.5) * 180000;
+        const nebulaSize = 15000 + Math.random() * 30000;
+
+        const baseColor = nebulaColors[Math.floor(Math.random() * nebulaColors.length)];
+        const secondaryColor = nebulaColors[Math.floor(Math.random() * nebulaColors.length)];
+        const tertiaryColor = nebulaColors[Math.floor(Math.random() * nebulaColors.length)];
+
+        for (let i = 0; i < particleCount; i++) {
+            // Gaussian-like distribution with wispy tendrils
+            const r = nebulaSize * Math.pow(Math.random(), 0.35);
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+
+            // Multiple tendril layers for organic look
+            const tendril1 = Math.sin(theta * 4 + phi * 2) * 0.4 + 1;
+            const tendril2 = Math.cos(theta * 2 - phi * 3) * 0.3 + 1;
+            const tendrilFactor = (tendril1 + tendril2) / 2;
+
+            positions[i * 3] = nebulaX + r * Math.sin(phi) * Math.cos(theta) * tendrilFactor;
+            positions[i * 3 + 1] = nebulaY + r * Math.sin(phi) * Math.sin(theta) * 0.5;
+            positions[i * 3 + 2] = nebulaZ + r * Math.cos(phi) * tendrilFactor;
+
+            // Rich color gradients blending three colors
+            const distFromCenter = r / nebulaSize;
+            const colorBlend = Math.random();
+            const colorVar = 0.3;
+
+            let finalColor;
+            if (colorBlend < 0.4) {
+                finalColor = baseColor;
+            } else if (colorBlend < 0.7) {
+                finalColor = secondaryColor;
+            } else {
+                finalColor = tertiaryColor;
+            }
+
+            const brightness = 1 - distFromCenter * 0.4;
+            colors[i * 3] = finalColor.r * brightness + (Math.random() - 0.5) * colorVar;
+            colors[i * 3 + 1] = finalColor.g * brightness + (Math.random() - 0.5) * colorVar;
+            colors[i * 3 + 2] = finalColor.b * brightness + (Math.random() - 0.5) * colorVar;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const nebulaOpacity = 0.02 + Math.random() * 0.03; // Reduced for less mist
+        const material = new THREE.PointsMaterial({
+            size: 40 + Math.random() * 60,
+            vertexColors: true,
+            transparent: true,
+            opacity: nebulaOpacity,
+            sizeAttenuation: true,
+            blending: THREE.AdditiveBlending
+        });
+
+        const nebula = new THREE.Points(geometry, material);
+        nebula.userData.baseOpacity = nebulaOpacity;
+        gameMode.scene.add(nebula);
+        gameMode.nebulae.push(nebula);
+    }
+
+    // Add bright emission nebulae (star-forming regions)
+    for (let n = 0; n < 10; n++) {
+        const particleCount = 3000;
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+
+        const nebulaX = (Math.random() - 0.5) * 150000;
+        const nebulaY = (Math.random() - 0.5) * 60000;
+        const nebulaZ = (Math.random() - 0.5) * 150000;
+        const coreSize = 8000 + Math.random() * 15000;
+
+        // Emission nebula colors (ionized gas)
+        const emissionColors = [
+            { r: 1.0, g: 0.3, b: 0.4 },  // H-alpha red
+            { r: 0.3, g: 0.9, b: 1.0 },  // OIII cyan
+            { r: 0.5, g: 0.7, b: 1.0 },  // Blue reflection
+            { r: 1.0, g: 0.6, b: 0.8 },  // Pink hydrogen
+            { r: 0.4, g: 1.0, b: 0.5 },  // Green oxygen
+        ];
+        const baseColor = emissionColors[Math.floor(Math.random() * emissionColors.length)];
+
+        for (let i = 0; i < particleCount; i++) {
+            const r = coreSize * Math.pow(Math.random(), 0.6);
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+
+            // Add pillar-like structures
+            const pillarEffect = Math.pow(Math.abs(Math.sin(theta * 3)), 2) * 0.5 + 0.5;
+
+            positions[i * 3] = nebulaX + r * Math.sin(phi) * Math.cos(theta);
+            positions[i * 3 + 1] = nebulaY + r * Math.sin(phi) * Math.sin(theta) * pillarEffect;
+            positions[i * 3 + 2] = nebulaZ + r * Math.cos(phi);
+
+            const brightness = 1 - (r / coreSize) * 0.4;
+            colors[i * 3] = baseColor.r * brightness;
+            colors[i * 3 + 1] = baseColor.g * brightness;
+            colors[i * 3 + 2] = baseColor.b * brightness;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 25,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.06,
+            sizeAttenuation: true,
+            blending: THREE.AdditiveBlending
+        });
+
+        const emissionNebula = new THREE.Points(geometry, material);
+        emissionNebula.userData.baseOpacity = 0.06;
+        gameMode.scene.add(emissionNebula);
+        gameMode.nebulae.push(emissionNebula);
+    }
+
+    // Add dark nebulae (dust clouds that obscure background)
+    for (let n = 0; n < 8; n++) {
+        const particleCount = 2000;
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+
+        const nebulaX = (Math.random() - 0.5) * 120000;
+        const nebulaY = (Math.random() - 0.5) * 50000;
+        const nebulaZ = (Math.random() - 0.5) * 120000;
+        const cloudSize = 10000 + Math.random() * 20000;
+
+        for (let i = 0; i < particleCount; i++) {
+            const r = cloudSize * Math.pow(Math.random(), 0.5);
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+
+            positions[i * 3] = nebulaX + r * Math.sin(phi) * Math.cos(theta);
+            positions[i * 3 + 1] = nebulaY + r * Math.sin(phi) * Math.sin(theta) * 0.4;
+            positions[i * 3 + 2] = nebulaZ + r * Math.cos(phi);
+
+            // Dark brownish-red colors
+            const darkness = 0.15 + Math.random() * 0.1;
+            colors[i * 3] = darkness * 1.2;
+            colors[i * 3 + 1] = darkness * 0.8;
+            colors[i * 3 + 2] = darkness * 0.6;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 80,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.08,
+            sizeAttenuation: true,
+            blending: THREE.NormalBlending
+        });
+
+        const darkNebula = new THREE.Points(geometry, material);
+        darkNebula.userData.baseOpacity = 0.08;
+        gameMode.scene.add(darkNebula);
+        gameMode.nebulae.push(darkNebula);
+    }
+}
+
+// Create distant galaxies
+function createDistantGalaxies() {
+    for (let g = 0; g < 5; g++) {
+        const galaxyParticles = 500;
+        const positions = new Float32Array(galaxyParticles * 3);
+        const colors = new Float32Array(galaxyParticles * 3);
+
+        const galaxyX = (Math.random() - 0.5) * 80000;
+        const galaxyY = (Math.random() - 0.5) * 40000;
+        const galaxyZ = -30000 - Math.random() * 30000;
+
+        for (let i = 0; i < galaxyParticles; i++) {
+            // Spiral galaxy shape
+            const arm = Math.floor(Math.random() * 2);
+            const distance = Math.random() * 2000;
+            const angle = (distance / 300) + arm * Math.PI + (Math.random() - 0.5) * 0.5;
+
+            positions[i * 3] = galaxyX + Math.cos(angle) * distance;
+            positions[i * 3 + 1] = galaxyY + (Math.random() - 0.5) * 150;
+            positions[i * 3 + 2] = galaxyZ + Math.sin(angle) * distance;
+
+            // Galaxy colors (warm center, blue edges)
+            const t = distance / 300;
+            colors[i * 3] = 1 - t * 0.3;
+            colors[i * 3 + 1] = 0.8 - t * 0.2;
+            colors[i * 3 + 2] = 0.6 + t * 0.4;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 3,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.6,
+            sizeAttenuation: true,
+            blending: THREE.AdditiveBlending
+        });
+
+        const galaxy = new THREE.Points(geometry, material);
+        gameMode.scene.add(galaxy);
+    }
+}
+
+// Create realistic starfield background with multiple layers
+function createStarfield() {
+    // Layer 0: Ultra-distant faint stars (creates depth)
+    const ultraDistantCount = 80000;
+    const ultraDistantPositions = new Float32Array(ultraDistantCount * 3);
+    const ultraDistantColors = new Float32Array(ultraDistantCount * 3);
+
+    for (let i = 0; i < ultraDistantCount; i++) {
+        const radius = 90000 + Math.random() * 50000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        ultraDistantPositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        ultraDistantPositions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+        ultraDistantPositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        const brightness = 0.2 + Math.random() * 0.3;
+        ultraDistantColors[i * 3] = brightness;
+        ultraDistantColors[i * 3 + 1] = brightness;
+        ultraDistantColors[i * 3 + 2] = brightness * 1.1;
+    }
+
+    const ultraDistantGeometry = new THREE.BufferGeometry();
+    ultraDistantGeometry.setAttribute('position', new THREE.BufferAttribute(ultraDistantPositions, 3));
+    ultraDistantGeometry.setAttribute('color', new THREE.BufferAttribute(ultraDistantColors, 3));
+
+    const ultraDistantMaterial = new THREE.PointsMaterial({
+        size: 1.5,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.5,
+        sizeAttenuation: true
+    });
+
+    const ultraDistantStars = new THREE.Points(ultraDistantGeometry, ultraDistantMaterial);
+    gameMode.scene.add(ultraDistantStars);
+
+    // Layer 1: Distant dim stars (most numerous)
+    const distantStarCount = 50000;
+    const distantPositions = new Float32Array(distantStarCount * 3);
+    const distantColors = new Float32Array(distantStarCount * 3);
+
+    for (let i = 0; i < distantStarCount; i++) {
+        const radius = 50000 + Math.random() * 70000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        distantPositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        distantPositions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+        distantPositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        // Realistic stellar classification colors
+        const colorChoice = Math.random();
+        const brightness = 0.5 + Math.random() * 0.5;
+        if (colorChoice < 0.03) {
+            // O-type: Blue (rare, very hot)
+            distantColors[i * 3] = 0.6 * brightness;
+            distantColors[i * 3 + 1] = 0.7 * brightness;
+            distantColors[i * 3 + 2] = 1.0 * brightness;
+        } else if (colorChoice < 0.13) {
+            // B-type: Blue-white
+            distantColors[i * 3] = 0.75 * brightness;
+            distantColors[i * 3 + 1] = 0.85 * brightness;
+            distantColors[i * 3 + 2] = 1.0 * brightness;
+        } else if (colorChoice < 0.20) {
+            // A-type: White
+            distantColors[i * 3] = 0.95 * brightness;
+            distantColors[i * 3 + 1] = 0.95 * brightness;
+            distantColors[i * 3 + 2] = 1.0 * brightness;
+        } else if (colorChoice < 0.27) {
+            // F-type: Yellow-white
+            distantColors[i * 3] = 1.0 * brightness;
+            distantColors[i * 3 + 1] = 0.95 * brightness;
+            distantColors[i * 3 + 2] = 0.85 * brightness;
+        } else if (colorChoice < 0.40) {
+            // G-type: Yellow (sun-like)
+            distantColors[i * 3] = 1.0 * brightness;
+            distantColors[i * 3 + 1] = 0.92 * brightness;
+            distantColors[i * 3 + 2] = 0.7 * brightness;
+        } else if (colorChoice < 0.60) {
+            // K-type: Orange
+            distantColors[i * 3] = 1.0 * brightness;
+            distantColors[i * 3 + 1] = 0.75 * brightness;
+            distantColors[i * 3 + 2] = 0.5 * brightness;
+        } else {
+            // M-type: Red (most common)
+            distantColors[i * 3] = 1.0 * brightness;
+            distantColors[i * 3 + 1] = 0.6 * brightness;
+            distantColors[i * 3 + 2] = 0.45 * brightness;
+        }
+    }
+
+    const distantGeometry = new THREE.BufferGeometry();
+    distantGeometry.setAttribute('position', new THREE.BufferAttribute(distantPositions, 3));
+    distantGeometry.setAttribute('color', new THREE.BufferAttribute(distantColors, 3));
+
+    const distantMaterial = new THREE.PointsMaterial({
+        size: 3,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.8,
+        sizeAttenuation: true
+    });
+
+    const distantStars = new THREE.Points(distantGeometry, distantMaterial);
+    gameMode.scene.add(distantStars);
+
+    // Layer 2: Mid-range stars
+    const midStarCount = 25000;
+    const midPositions = new Float32Array(midStarCount * 3);
+    const midColors = new Float32Array(midStarCount * 3);
+
+    for (let i = 0; i < midStarCount; i++) {
+        const radius = 25000 + Math.random() * 35000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        midPositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        midPositions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+        midPositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        // Slightly brighter colors
+        const colorChoice = Math.random();
+        if (colorChoice < 0.5) {
+            midColors[i * 3] = 1; midColors[i * 3 + 1] = 1; midColors[i * 3 + 2] = 1;
+        } else if (colorChoice < 0.7) {
+            midColors[i * 3] = 1; midColors[i * 3 + 1] = 0.95; midColors[i * 3 + 2] = 0.8;
+        } else if (colorChoice < 0.85) {
+            midColors[i * 3] = 0.8; midColors[i * 3 + 1] = 0.9; midColors[i * 3 + 2] = 1;
+        } else {
+            midColors[i * 3] = 1; midColors[i * 3 + 1] = 0.7; midColors[i * 3 + 2] = 0.5;
+        }
+    }
+
+    const midGeometry = new THREE.BufferGeometry();
+    midGeometry.setAttribute('position', new THREE.BufferAttribute(midPositions, 3));
+    midGeometry.setAttribute('color', new THREE.BufferAttribute(midColors, 3));
+
+    const midMaterial = new THREE.PointsMaterial({
+        size: 5,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9,
+        sizeAttenuation: true
+    });
+
+    gameMode.stars = new THREE.Points(midGeometry, midMaterial);
+    gameMode.scene.add(gameMode.stars);
+
+    // Layer 3: Bright foreground stars
+    const brightStarCount = 1500;
+    const brightPositions = new Float32Array(brightStarCount * 3);
+    const brightColors = new Float32Array(brightStarCount * 3);
+
+    for (let i = 0; i < brightStarCount; i++) {
+        const radius = 12000 + Math.random() * 20000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        brightPositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        brightPositions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+        brightPositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        // Bright star colors
+        const colorChoice = Math.random();
+        if (colorChoice < 0.4) {
+            brightColors[i * 3] = 1; brightColors[i * 3 + 1] = 1; brightColors[i * 3 + 2] = 1;
+        } else if (colorChoice < 0.6) {
+            brightColors[i * 3] = 0.85; brightColors[i * 3 + 1] = 0.92; brightColors[i * 3 + 2] = 1;
+        } else if (colorChoice < 0.8) {
+            brightColors[i * 3] = 1; brightColors[i * 3 + 1] = 0.98; brightColors[i * 3 + 2] = 0.85;
+        } else {
+            brightColors[i * 3] = 1; brightColors[i * 3 + 1] = 0.8; brightColors[i * 3 + 2] = 0.6;
+        }
+    }
+
+    const brightGeometry = new THREE.BufferGeometry();
+    brightGeometry.setAttribute('position', new THREE.BufferAttribute(brightPositions, 3));
+    brightGeometry.setAttribute('color', new THREE.BufferAttribute(brightColors, 3));
+
+    const brightMaterial = new THREE.PointsMaterial({
+        size: 10,
+        vertexColors: true,
+        transparent: true,
+        opacity: 1,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending
+    });
+
+    const brightStars = new THREE.Points(brightGeometry, brightMaterial);
+    gameMode.scene.add(brightStars);
+    gameMode.brightStars = brightStars;
+
+    // Layer 4: Very bright "named" stars (like Sirius, Vega) with glow
+    const superBrightCount = 150;
+    const superBrightPositions = new Float32Array(superBrightCount * 3);
+    const superBrightColors = new Float32Array(superBrightCount * 3);
+
+    for (let i = 0; i < superBrightCount; i++) {
+        const radius = 15000 + Math.random() * 35000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        superBrightPositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        superBrightPositions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+        superBrightPositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        // Give super bright stars slight color variation
+        const colorVar = Math.random();
+        if (colorVar < 0.4) {
+            superBrightColors[i * 3] = 1;
+            superBrightColors[i * 3 + 1] = 1;
+            superBrightColors[i * 3 + 2] = 1;
+        } else if (colorVar < 0.6) {
+            superBrightColors[i * 3] = 0.9;
+            superBrightColors[i * 3 + 1] = 0.95;
+            superBrightColors[i * 3 + 2] = 1;
+        } else if (colorVar < 0.8) {
+            superBrightColors[i * 3] = 1;
+            superBrightColors[i * 3 + 1] = 0.95;
+            superBrightColors[i * 3 + 2] = 0.85;
+        } else {
+            superBrightColors[i * 3] = 1;
+            superBrightColors[i * 3 + 1] = 0.85;
+            superBrightColors[i * 3 + 2] = 0.7;
+        }
+    }
+
+    const superBrightGeometry = new THREE.BufferGeometry();
+    superBrightGeometry.setAttribute('position', new THREE.BufferAttribute(superBrightPositions, 3));
+    superBrightGeometry.setAttribute('color', new THREE.BufferAttribute(superBrightColors, 3));
+
+    const superBrightMaterial = new THREE.PointsMaterial({
+        size: 20,
+        vertexColors: true,
+        transparent: true,
+        opacity: 1,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending
+    });
+
+    const superBrightStars = new THREE.Points(superBrightGeometry, superBrightMaterial);
+    gameMode.scene.add(superBrightStars);
+    gameMode.superBrightStars = superBrightStars;
+
+    // Store original sizes for twinkling animation
+    gameMode.starTwinkleData = {
+        brightStars: {
+            material: brightMaterial,
+            baseSize: 10,
+            positions: brightPositions,
+            phases: new Float32Array(brightStarCount).map(() => Math.random() * Math.PI * 2)
+        },
+        superBright: {
+            material: superBrightMaterial,
+            baseSize: 20,
+            positions: superBrightPositions,
+            phases: new Float32Array(superBrightCount).map(() => Math.random() * Math.PI * 2)
+        }
+    };
+}
+
+// Create the galactic plane (Milky Way band)
+function createGalacticPlane() {
+    const particleCount = 40000;
+    const positions = new Float32Array(particleCount * 3);
+    const colors = new Float32Array(particleCount * 3);
+
+    for (let i = 0; i < particleCount; i++) {
+        // Create a band across the sky
+        const distance = 40000 + Math.random() * 60000;
+        const angle = Math.random() * Math.PI * 2;
+
+        // Flatten into a disk/band shape
+        const bandWidth = 8000 + Math.random() * 12000;
+        const heightVariation = (Math.random() - 0.5) * bandWidth * 0.3;
+
+        positions[i * 3] = Math.cos(angle) * distance;
+        positions[i * 3 + 1] = heightVariation;
+        positions[i * 3 + 2] = Math.sin(angle) * distance;
+
+        // Milky way colors - mostly dim white/cream with some variation
+        const brightness = 0.3 + Math.random() * 0.5;
+        const colorVar = Math.random();
+        if (colorVar < 0.7) {
+            // Cream/white
+            colors[i * 3] = brightness;
+            colors[i * 3 + 1] = brightness * 0.95;
+            colors[i * 3 + 2] = brightness * 0.85;
+        } else if (colorVar < 0.85) {
+            // Slight blue tint (young stars)
+            colors[i * 3] = brightness * 0.85;
+            colors[i * 3 + 1] = brightness * 0.9;
+            colors[i * 3 + 2] = brightness;
+        } else {
+            // Slight red/orange (old stars)
+            colors[i * 3] = brightness;
+            colors[i * 3 + 1] = brightness * 0.7;
+            colors[i * 3 + 2] = brightness * 0.5;
+        }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: 8,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.25,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending
+    });
+
+    const galacticPlane = new THREE.Points(geometry, material);
+    galacticPlane.rotation.x = Math.PI * 0.15; // Tilt the band
+    galacticPlane.rotation.z = Math.PI * 0.1;
+    gameMode.scene.add(galacticPlane);
+
+    // Add denser core region
+    const coreCount = 15000;
+    const corePositions = new Float32Array(coreCount * 3);
+    const coreColors = new Float32Array(coreCount * 3);
+
+    for (let i = 0; i < coreCount; i++) {
+        const distance = 50000 + Math.random() * 30000;
+        const angle = (Math.random() - 0.5) * 0.8; // Concentrated in one direction
+        const spread = (Math.random() - 0.5) * 15000;
+
+        corePositions[i * 3] = Math.cos(angle) * distance + spread * 0.3;
+        corePositions[i * 3 + 1] = (Math.random() - 0.5) * 5000;
+        corePositions[i * 3 + 2] = Math.sin(angle) * distance + spread;
+
+        const brightness = 0.4 + Math.random() * 0.4;
+        coreColors[i * 3] = brightness;
+        coreColors[i * 3 + 1] = brightness * 0.9;
+        coreColors[i * 3 + 2] = brightness * 0.75;
+    }
+
+    const coreGeometry = new THREE.BufferGeometry();
+    coreGeometry.setAttribute('position', new THREE.BufferAttribute(corePositions, 3));
+    coreGeometry.setAttribute('color', new THREE.BufferAttribute(coreColors, 3));
+
+    const coreMaterial = new THREE.PointsMaterial({
+        size: 10,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.35,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending
+    });
+
+    const galacticCore = new THREE.Points(coreGeometry, coreMaterial);
+    galacticCore.rotation.x = Math.PI * 0.15;
+    galacticCore.rotation.z = Math.PI * 0.1;
+    gameMode.scene.add(galacticCore);
+}
+
+// Create cosmic dust clouds and floating debris
+function createCosmicDust() {
+    // Vast dust lanes spanning the scene
+    for (let d = 0; d < 12; d++) {
+        const dustCount = 5000;
+        const positions = new Float32Array(dustCount * 3);
+        const colors = new Float32Array(dustCount * 3);
+
+        const centerX = (Math.random() - 0.5) * 160000;
+        const centerY = (Math.random() - 0.5) * 40000;
+        const centerZ = (Math.random() - 0.5) * 160000;
+        const cloudSize = 15000 + Math.random() * 25000;
+
+        for (let i = 0; i < dustCount; i++) {
+            const r = cloudSize * Math.pow(Math.random(), 0.6);
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+
+            // Create streaky, filament-like structures
+            const streakFactor = Math.sin(theta * 5) * 0.5 + 1;
+
+            positions[i * 3] = centerX + r * Math.sin(phi) * Math.cos(theta) * streakFactor;
+            positions[i * 3 + 1] = centerY + r * Math.sin(phi) * Math.sin(theta) * 0.25;
+            positions[i * 3 + 2] = centerZ + r * Math.cos(phi) * streakFactor;
+
+            // Varied dust colors - some darker, some with slight tint
+            const dustType = Math.random();
+            if (dustType < 0.6) {
+                // Dark brown dust
+                const darkness = 0.08 + Math.random() * 0.12;
+                colors[i * 3] = darkness * 1.1;
+                colors[i * 3 + 1] = darkness * 0.9;
+                colors[i * 3 + 2] = darkness * 0.7;
+            } else if (dustType < 0.8) {
+                // Reddish dust
+                const darkness = 0.1 + Math.random() * 0.1;
+                colors[i * 3] = darkness * 1.5;
+                colors[i * 3 + 1] = darkness * 0.6;
+                colors[i * 3 + 2] = darkness * 0.4;
+            } else {
+                // Slight blue reflection dust
+                const darkness = 0.05 + Math.random() * 0.08;
+                colors[i * 3] = darkness * 0.8;
+                colors[i * 3 + 1] = darkness * 0.9;
+                colors[i * 3 + 2] = darkness * 1.2;
+            }
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 100 + Math.random() * 50,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.12 + Math.random() * 0.08,
+            sizeAttenuation: true
+        });
+
+        const dustCloud = new THREE.Points(geometry, material);
+        gameMode.scene.add(dustCloud);
+    }
+
+    // Add floating ice/debris particles throughout the system
+    const debrisCount = 15000;
+    const debrisPositions = new Float32Array(debrisCount * 3);
+    const debrisColors = new Float32Array(debrisCount * 3);
+
+    for (let i = 0; i < debrisCount; i++) {
+        const radius = 3000 + Math.random() * 100000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        debrisPositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        debrisPositions[i * 3 + 1] = (Math.random() - 0.5) * 20000;
+        debrisPositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        // Icy/metallic debris colors
+        const type = Math.random();
+        if (type < 0.5) {
+            // Ice
+            debrisColors[i * 3] = 0.7 + Math.random() * 0.3;
+            debrisColors[i * 3 + 1] = 0.8 + Math.random() * 0.2;
+            debrisColors[i * 3 + 2] = 0.9 + Math.random() * 0.1;
+        } else {
+            // Rock/metal
+            const gray = 0.3 + Math.random() * 0.3;
+            debrisColors[i * 3] = gray;
+            debrisColors[i * 3 + 1] = gray * 0.9;
+            debrisColors[i * 3 + 2] = gray * 0.8;
+        }
+    }
+
+    const debrisGeometry = new THREE.BufferGeometry();
+    debrisGeometry.setAttribute('position', new THREE.BufferAttribute(debrisPositions, 3));
+    debrisGeometry.setAttribute('color', new THREE.BufferAttribute(debrisColors, 3));
+
+    const debrisMaterial = new THREE.PointsMaterial({
+        size: 8,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.6,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending
+    });
+
+    const debris = new THREE.Points(debrisGeometry, debrisMaterial);
+    gameMode.scene.add(debris);
+    gameMode.floatingDebris = debris;
+}
+
+// Create asteroid belt - scaled for massive solar system with huge sun
+function createAsteroidBelt() {
+    const asteroidCount = 3000;
+
+    // Main belt between inner and outer planets - much larger
+    const beltRadius = 60000;  // Further out to match new orbital spacing
+    const beltWidth = 15000;
+
+    for (let i = 0; i < asteroidCount; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = beltRadius + (Math.random() - 0.5) * beltWidth;
+        const height = (Math.random() - 0.5) * 2000;
+
+        // Larger asteroids for the scaled scene
+        const size = 10 + Math.random() * 60;
+        const geometry = new THREE.IcosahedronGeometry(size, 0);
+
+        // Randomize vertices for irregular shape
+        const positions = geometry.attributes.position;
+        for (let v = 0; v < positions.count; v++) {
+            positions.setX(v, positions.getX(v) * (0.6 + Math.random() * 0.8));
+            positions.setY(v, positions.getY(v) * (0.6 + Math.random() * 0.8));
+            positions.setZ(v, positions.getZ(v) * (0.6 + Math.random() * 0.8));
+        }
+        geometry.computeVertexNormals();
+
+        // More varied asteroid colors
+        const asteroidType = Math.random();
+        let color, emissive;
+        if (asteroidType < 0.4) {
+            // C-type (carbonaceous) - dark
+            color = 0x333333 + Math.floor(Math.random() * 0x111111);
+            emissive = 0x080808;
+        } else if (asteroidType < 0.7) {
+            // S-type (siliceous) - lighter, reddish
+            color = 0x665544 + Math.floor(Math.random() * 0x222211);
+            emissive = 0x110808;
+        } else {
+            // M-type (metallic) - grayish with shine
+            color = 0x888888 + Math.floor(Math.random() * 0x222222);
+            emissive = 0x111111;
+        }
+
+        const material = new THREE.MeshPhongMaterial({
+            color: color,
+            emissive: emissive,
+            emissiveIntensity: 0.15,
+            flatShading: true,
+            shininess: asteroidType > 0.7 ? 30 : 5
+        });
+
+        const asteroid = new THREE.Mesh(geometry, material);
+        asteroid.position.set(
+            Math.cos(angle) * radius,
+            height,
+            Math.sin(angle) * radius
+        );
+        asteroid.rotation.set(
+            Math.random() * Math.PI,
+            Math.random() * Math.PI,
+            Math.random() * Math.PI
+        );
+
+        // Store orbit data for animation
+        asteroid.userData.orbitAngle = angle;
+        asteroid.userData.orbitRadius = radius;
+        asteroid.userData.orbitSpeed = 0.00005 + Math.random() * 0.0001;
+        asteroid.userData.rotationSpeed = {
+            x: (Math.random() - 0.5) * 0.01,
+            y: (Math.random() - 0.5) * 0.01,
+            z: (Math.random() - 0.5) * 0.01
+        };
+        asteroid.userData.isAsteroid = true;
+
+        gameMode.scene.add(asteroid);
+    }
+}
+
+// Create ambient space dust particles near camera
+function createAmbientDust() {
+    const dustCount = 1000;
+    const positions = new Float32Array(dustCount * 3);
+    const colors = new Float32Array(dustCount * 3);
+
+    for (let i = 0; i < dustCount; i++) {
+        // Distribute around camera starting position
+        positions[i * 3] = (Math.random() - 0.5) * 5000;
+        positions[i * 3 + 1] = (Math.random() - 0.5) * 3000 + 500;
+        positions[i * 3 + 2] = (Math.random() - 0.5) * 5000 + 2000;
+
+        const brightness = 0.3 + Math.random() * 0.4;
+        colors[i * 3] = brightness;
+        colors[i * 3 + 1] = brightness;
+        colors[i * 3 + 2] = brightness;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: 1.5,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.3,
+        sizeAttenuation: true
+    });
+
+    gameMode.ambientDust = new THREE.Points(geometry, material);
+    gameMode.scene.add(gameMode.ambientDust);
+}
+
+// Create a shooting star effect
+function createShootingStar() {
+    if (gameMode.shootingStar) return;
+
+    // Random starting position in the sky
+    const camPos = gameMode.camera.position;
+    const startDistance = 8000 + Math.random() * 15000;
+    const startTheta = Math.random() * Math.PI * 2;
+    const startPhi = Math.PI * 0.1 + Math.random() * Math.PI * 0.4; // Upper hemisphere
+
+    const startPos = new THREE.Vector3(
+        camPos.x + startDistance * Math.sin(startPhi) * Math.cos(startTheta),
+        camPos.y + startDistance * Math.cos(startPhi),
+        camPos.z + startDistance * Math.sin(startPhi) * Math.sin(startTheta)
+    );
+
+    // Direction of travel (downward and across)
+    const direction = new THREE.Vector3(
+        (Math.random() - 0.5) * 2,
+        -0.8 - Math.random() * 0.4,
+        (Math.random() - 0.5) * 2
+    ).normalize();
+
+    // Create the shooting star trail
+    const trailLength = 20;
+    const positions = new Float32Array(trailLength * 3);
+    const colors = new Float32Array(trailLength * 3);
+
+    for (let i = 0; i < trailLength; i++) {
+        const t = i / trailLength;
+        positions[i * 3] = startPos.x - direction.x * i * 50;
+        positions[i * 3 + 1] = startPos.y - direction.y * i * 50;
+        positions[i * 3 + 2] = startPos.z - direction.z * i * 50;
+
+        // Fade from white to blue
+        const brightness = 1 - t * 0.8;
+        colors[i * 3] = brightness;
+        colors[i * 3 + 1] = brightness;
+        colors[i * 3 + 2] = brightness * 1.2;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: 15,
+        vertexColors: true,
+        transparent: true,
+        opacity: 1,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending
+    });
+
+    const shootingStar = new THREE.Points(geometry, material);
+    gameMode.scene.add(shootingStar);
+
+    gameMode.shootingStar = {
+        mesh: shootingStar,
+        direction: direction,
+        speed: 150 + Math.random() * 100,
+        life: 0,
+        maxLife: 80 + Math.random() * 40
+    };
+}
+
+// Update shooting star position
+function updateShootingStar() {
+    if (!gameMode.shootingStar) return;
+
+    const star = gameMode.shootingStar;
+    star.life++;
+
+    // Move the shooting star
+    const positions = star.mesh.geometry.attributes.position.array;
+    for (let i = 0; i < positions.length / 3; i++) {
+        positions[i * 3] += star.direction.x * star.speed;
+        positions[i * 3 + 1] += star.direction.y * star.speed;
+        positions[i * 3 + 2] += star.direction.z * star.speed;
+    }
+    star.mesh.geometry.attributes.position.needsUpdate = true;
+
+    // Fade out near end of life
+    const fadeStart = star.maxLife * 0.6;
+    if (star.life > fadeStart) {
+        const fadeProgress = (star.life - fadeStart) / (star.maxLife - fadeStart);
+        star.mesh.material.opacity = 1 - fadeProgress;
+    }
+
+    // Remove when dead
+    if (star.life >= star.maxLife) {
+        gameMode.scene.remove(star.mesh);
+        star.mesh.geometry.dispose();
+        star.mesh.material.dispose();
+        gameMode.shootingStar = null;
+    }
+}
+
+// Initialize speed lines for motion effect
+function initSpeedLines() {
+    const speedLinesContainer = document.getElementById('speedLines');
+    speedLinesContainer.innerHTML = '';
+
+    // Create 30 speed lines
+    for (let i = 0; i < 30; i++) {
+        const line = document.createElement('div');
+        line.className = 'speed-line';
+        line.style.left = Math.random() * 100 + '%';
+        line.style.top = Math.random() * 100 + '%';
+        line.style.animationDelay = Math.random() * 0.3 + 's';
+        speedLinesContainer.appendChild(line);
+    }
+}
+
+// Create central sun
+function createSun() {
+    // Sun geometry - MASSIVE central star (10x bigger)
+    const sunGeometry = new THREE.SphereGeometry(8000, 64, 64);
+    const sunMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffaa00,
+        transparent: true,
+        opacity: 0.95
+    });
+    const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+    sun.position.set(0, 0, 0);
+    gameMode.scene.add(sun);
+
+    // Sun corona (outer glow)
+    const coronaGeometry = new THREE.SphereGeometry(12000, 64, 64);
+    const coronaMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff6600,
+        transparent: true,
+        opacity: 0.25,
+        side: THREE.BackSide
+    });
+    const corona = new THREE.Mesh(coronaGeometry, coronaMaterial);
+    corona.position.set(0, 0, 0);
+    gameMode.scene.add(corona);
+
+    // Inner glow
+    const glowGeometry = new THREE.SphereGeometry(9500, 64, 64);
+    const glowMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffcc44,
+        transparent: true,
+        opacity: 0.18,
+        side: THREE.BackSide
+    });
+    const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+    glow.position.set(0, 0, 0);
+    gameMode.scene.add(glow);
+
+    // Outer halo
+    const haloGeometry = new THREE.SphereGeometry(15000, 32, 32);
+    const haloMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffdd88,
+        transparent: true,
+        opacity: 0.08,
+        side: THREE.BackSide
+    });
+    const halo = new THREE.Mesh(haloGeometry, haloMaterial);
+    halo.position.set(0, 0, 0);
+    gameMode.scene.add(halo);
+
+    // Solar flare particles around the sun
+    const flareCount = 5000;
+    const flarePositions = new Float32Array(flareCount * 3);
+    const flareColors = new Float32Array(flareCount * 3);
+
+    for (let i = 0; i < flareCount; i++) {
+        const radius = 8000 + Math.random() * 6000;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+
+        flarePositions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        flarePositions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+        flarePositions[i * 3 + 2] = radius * Math.cos(phi);
+
+        // Yellow-orange-white colors
+        const heat = Math.random();
+        flareColors[i * 3] = 1;
+        flareColors[i * 3 + 1] = 0.5 + heat * 0.5;
+        flareColors[i * 3 + 2] = heat * 0.5;
+    }
+
+    const flareGeometry = new THREE.BufferGeometry();
+    flareGeometry.setAttribute('position', new THREE.BufferAttribute(flarePositions, 3));
+    flareGeometry.setAttribute('color', new THREE.BufferAttribute(flareColors, 3));
+
+    const flareMaterial = new THREE.PointsMaterial({
+        size: 80,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.6,
+        blending: THREE.AdditiveBlending
+    });
+
+    const flares = new THREE.Points(flareGeometry, flareMaterial);
+    gameMode.scene.add(flares);
+    gameMode.sunFlares = flares;
+
+    // Point light from sun - intense light flooding the vast system
+    const sunLight = new THREE.PointLight(0xffdd66, 10, 300000);
+    sunLight.position.set(0, 0, 0);
+    gameMode.scene.add(sunLight);
+
+    // Secondary warm light for fill
+    const sunLight2 = new THREE.PointLight(0xffaa33, 5, 200000);
+    sunLight2.position.set(0, 0, 0);
+    gameMode.scene.add(sunLight2);
+
+    // Add hemisphere light for overall illumination
+    const hemiLight = new THREE.HemisphereLight(0xffffcc, 0x222244, 1.5);
+    gameMode.scene.add(hemiLight);
+}
+
+// Planet type configurations for variety
+const PLANET_TYPES = [
+    { name: 'terrestrial', colors: [0x4488aa, 0x448866, 0x886644], hasAtmosphere: true, atmosphereColor: 0x88ccff },
+    { name: 'gas_giant', colors: [0xddaa66, 0xcc8844, 0xbb9955], hasAtmosphere: true, atmosphereColor: 0xffddaa, hasRings: true },
+    { name: 'ice_giant', colors: [0x66aacc, 0x5599bb, 0x4488aa], hasAtmosphere: true, atmosphereColor: 0xaaddff },
+    { name: 'desert', colors: [0xcc9966, 0xbb8855, 0xaa7744], hasAtmosphere: true, atmosphereColor: 0xffccaa },
+    { name: 'volcanic', colors: [0x884422, 0x662211, 0x993322], hasAtmosphere: true, atmosphereColor: 0xff6644 },
+    { name: 'ocean', colors: [0x2266aa, 0x3377bb, 0x1155aa], hasAtmosphere: true, atmosphereColor: 0x66aaff },
+    { name: 'barren', colors: [0x666666, 0x555555, 0x777777], hasAtmosphere: false },
+    { name: 'toxic', colors: [0x668844, 0x557733, 0x779955], hasAtmosphere: true, atmosphereColor: 0xaaff66 },
+];
+
+// Create spherical nodes from network data as realistic planets
+function createNodeSpheres() {
+    // Clear existing nodes
+    gameMode.nodeMeshes.forEach(mesh => {
+        // Remove all children (atmosphere, rings, moons)
+        while (mesh.children.length > 0) {
+            const child = mesh.children[0];
+            mesh.remove(child);
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) child.material.dispose();
+        }
+        gameMode.scene.remove(mesh);
+        mesh.geometry.dispose();
+        mesh.material.dispose();
+    });
+    gameMode.nodeMeshes = [];
+    gameMode.nodeDataMap.clear();
+
+    // Get current nodes from vis.js
+    const allNodes = nodes.get();
+    if (allNodes.length === 0) return;
+
+    // Position nodes in orbital rings around the sun
+    const nodeCount = allNodes.length;
+    const rings = Math.ceil(Math.sqrt(nodeCount));
+
+    allNodes.forEach((node, index) => {
+        // Determine ring and position within ring
+        const ring = Math.floor(index / Math.max(1, Math.ceil(nodeCount / rings)));
+        const positionInRing = index % Math.max(1, Math.ceil(nodeCount / rings));
+        const nodesInRing = Math.ceil(nodeCount / rings);
+
+        // Calculate orbital position - vast solar system with huge sun
+        const orbitRadius = 25000 + ring * 25000;  // Start further out, more spacing
+        const angle = (positionInRing / nodesInRing) * Math.PI * 2 + ring * 0.5;
+        const verticalOffset = (Math.random() - 0.5) * 8000;
+        const orbitTilt = (Math.random() - 0.5) * 0.4; // Slight orbital plane tilt
+
+        // Size based on packet count - MASSIVE planets (10x original)
+        const packetCount = extractPacketCount(node.title) || 1;
+        const baseSize = 1500;  // Minimum planet size
+        const maxSize = 6000;   // Maximum planet size
+        const size = Math.min(maxSize, baseSize + Math.log10(packetCount + 1) * 1200);
+
+        // Select planet type based on hash of node ID for consistency
+        const planetTypeIndex = hashCode(node.id) % PLANET_TYPES.length;
+        const planetType = PLANET_TYPES[Math.abs(planetTypeIndex)];
+
+        // Create planet group
+        const planetGroup = new THREE.Group();
+
+        // Main planet body with high detail
+        const geometry = new THREE.SphereGeometry(size, 64, 64);
+        const baseColor = planetType.colors[Math.abs(hashCode(node.id + 'color')) % planetType.colors.length];
+
+        // Create procedural surface variation
+        const material = new THREE.MeshPhongMaterial({
+            color: baseColor,
+            emissive: baseColor,
+            emissiveIntensity: 0.12,
+            shininess: 40,
+            transparent: false
+        });
+
+        const planet = new THREE.Mesh(geometry, material);
+        planet.rotation.x = Math.random() * 0.5;
+        planet.rotation.z = Math.random() * 0.3;
+        planetGroup.add(planet);
+
+        // Add surface features layer (continents/storms/terrain)
+        const featureGeometry = new THREE.SphereGeometry(size * 1.002, 64, 64);
+        const featureColor = new THREE.Color(baseColor).offsetHSL(0.05, 0.1, 0.15);
+        const featureMaterial = new THREE.MeshPhongMaterial({
+            color: featureColor,
+            emissive: featureColor,
+            emissiveIntensity: 0.08,
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending
+        });
+        const features = new THREE.Mesh(featureGeometry, featureMaterial);
+        features.rotation.y = Math.random() * Math.PI;
+        planetGroup.add(features);
+
+        // Add cloud layer for atmospheric planets
+        if (planetType.hasAtmosphere && Math.random() > 0.3) {
+            const cloudGeometry = new THREE.SphereGeometry(size * 1.02, 48, 48);
+            const cloudMaterial = new THREE.MeshPhongMaterial({
+                color: 0xffffff,
+                emissive: 0x222222,
+                transparent: true,
+                opacity: 0.25,
+                blending: THREE.NormalBlending
+            });
+            const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
+            clouds.userData.rotationSpeed = 0.0002 + Math.random() * 0.0003;
+            planetGroup.add(clouds);
+        }
+
+        // Add polar ice caps for terrestrial planets
+        if (planetType.name === 'terrestrial' || planetType.name === 'ocean') {
+            const capSize = size * 0.25;
+            const northCapGeometry = new THREE.SphereGeometry(capSize, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3);
+            const capMaterial = new THREE.MeshPhongMaterial({
+                color: 0xeeffff,
+                emissive: 0x446688,
+                emissiveIntensity: 0.2,
+                transparent: true,
+                opacity: 0.8
+            });
+            const northCap = new THREE.Mesh(northCapGeometry, capMaterial);
+            northCap.position.y = size * 0.92;
+            planetGroup.add(northCap);
+
+            const southCap = new THREE.Mesh(northCapGeometry, capMaterial);
+            southCap.position.y = -size * 0.92;
+            southCap.rotation.x = Math.PI;
+            planetGroup.add(southCap);
+        }
+
+        // Add storm bands for gas giants
+        if (planetType.name === 'gas_giant') {
+            for (let b = 0; b < 5; b++) {
+                const bandGeometry = new THREE.TorusGeometry(size * (0.7 + b * 0.12), size * 0.02, 8, 64);
+                const bandColor = new THREE.Color(baseColor).offsetHSL(b * 0.02, -0.1, b % 2 === 0 ? 0.1 : -0.1);
+                const bandMaterial = new THREE.MeshBasicMaterial({
+                    color: bandColor,
+                    transparent: true,
+                    opacity: 0.4
+                });
+                const band = new THREE.Mesh(bandGeometry, bandMaterial);
+                band.rotation.x = Math.PI / 2;
+                band.position.y = size * (0.6 - b * 0.25);
+                planetGroup.add(band);
+            }
+
+            // Great storm spot
+            if (Math.random() > 0.5) {
+                const stormGeometry = new THREE.SphereGeometry(size * 0.15, 32, 32);
+                const stormMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xff6644,
+                    transparent: true,
+                    opacity: 0.7
+                });
+                const storm = new THREE.Mesh(stormGeometry, stormMaterial);
+                storm.position.set(size * 0.8, size * 0.2, size * 0.4);
+                planetGroup.add(storm);
+            }
+        }
+
+        // Add volcanic activity for volcanic planets
+        if (planetType.name === 'volcanic') {
+            for (let v = 0; v < 8; v++) {
+                const volcanoGlow = new THREE.PointLight(0xff4400, 0.5, size * 0.8);
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.random() * Math.PI;
+                volcanoGlow.position.set(
+                    size * Math.sin(phi) * Math.cos(theta),
+                    size * Math.cos(phi),
+                    size * Math.sin(phi) * Math.sin(theta)
+                );
+                planetGroup.add(volcanoGlow);
+            }
+        }
+
+        // Add atmosphere glow
+        if (planetType.hasAtmosphere) {
+            const atmosphereGeometry = new THREE.SphereGeometry(size * 1.15, 32, 32);
+            const atmosphereMaterial = new THREE.MeshBasicMaterial({
+                color: planetType.atmosphereColor,
+                transparent: true,
+                opacity: 0.15,
+                side: THREE.BackSide
+            });
+            const atmosphere = new THREE.Mesh(atmosphereGeometry, atmosphereMaterial);
+            planetGroup.add(atmosphere);
+
+            // Inner glow
+            const innerGlowGeometry = new THREE.SphereGeometry(size * 1.05, 32, 32);
+            const innerGlowMaterial = new THREE.MeshBasicMaterial({
+                color: planetType.atmosphereColor,
+                transparent: true,
+                opacity: 0.08,
+                side: THREE.FrontSide
+            });
+            const innerGlow = new THREE.Mesh(innerGlowGeometry, innerGlowMaterial);
+            planetGroup.add(innerGlow);
+        }
+
+        // Add rings to some planets (gas giants or random chance)
+        const hasRings = planetType.hasRings || (size > 1500 && Math.random() > 0.5);
+        if (hasRings) {
+            const ringInnerRadius = size * 1.4;
+            const ringOuterRadius = size * 2.2;
+            const ringGeometry = new THREE.RingGeometry(ringInnerRadius, ringOuterRadius, 64);
+            const ringMaterial = new THREE.MeshBasicMaterial({
+                color: 0xccbb99,
+                transparent: true,
+                opacity: 0.4,
+                side: THREE.DoubleSide
+            });
+            const rings = new THREE.Mesh(ringGeometry, ringMaterial);
+            rings.rotation.x = Math.PI / 2 + (Math.random() - 0.5) * 0.3;
+            planetGroup.add(rings);
+        }
+
+        // Add moons to larger planets
+        if (size > 200 && Math.random() > 0.4) {
+            const moonCount = Math.floor(Math.random() * 4) + 1;
+            for (let m = 0; m < moonCount; m++) {
+                const moonSize = size * (0.08 + Math.random() * 0.12);
+                const moonDistance = size * (1.4 + m * 0.5 + Math.random() * 0.3);
+                const moonGeometry = new THREE.SphereGeometry(moonSize, 24, 24);
+                const moonMaterial = new THREE.MeshPhongMaterial({
+                    color: 0x999999,
+                    emissive: 0x333333,
+                    emissiveIntensity: 0.15
+                });
+                const moon = new THREE.Mesh(moonGeometry, moonMaterial);
+                moon.userData.moonOrbitRadius = moonDistance;
+                moon.userData.moonOrbitSpeed = 0.008 + Math.random() * 0.012;
+                moon.userData.moonOrbitAngle = Math.random() * Math.PI * 2;
+                moon.position.set(moonDistance, 0, 0);
+                planetGroup.add(moon);
+            }
+        }
+
+        // Position the planet group
+        planetGroup.position.set(
+            Math.cos(angle) * orbitRadius,
+            verticalOffset + Math.sin(angle * 2) * orbitTilt * orbitRadius,
+            Math.sin(angle) * orbitRadius
+        );
+
+        // Store node data
+        gameMode.nodeDataMap.set(planetGroup.uuid, {
+            id: node.id,
+            label: node.label,
+            title: node.title,
+            packetCount: packetCount,
+            orbitRadius: orbitRadius,
+            orbitAngle: angle,
+            orbitTilt: orbitTilt,
+            orbitSpeed: 0.0003 + Math.random() * 0.0008,
+            rotationSpeed: 0.005 + Math.random() * 0.01,
+            planetType: planetType.name,
+            size: size
+        });
+
+        gameMode.scene.add(planetGroup);
+        gameMode.nodeMeshes.push(planetGroup);
+    });
+}
+
+// Simple hash function for consistent planet types
+function hashCode(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return hash;
+}
+
+// Create space elevators between connected planets
+function createSpaceElevators() {
+    // Clear existing elevators
+    gameMode.spaceElevators.forEach(elevator => {
+        if (elevator.line) {
+            gameMode.scene.remove(elevator.line);
+            elevator.line.geometry.dispose();
+            elevator.line.material.dispose();
+        }
+        if (elevator.glow) {
+            gameMode.scene.remove(elevator.glow);
+            elevator.glow.geometry.dispose();
+            elevator.glow.material.dispose();
+        }
+        if (elevator.particles) {
+            gameMode.scene.remove(elevator.particles);
+            elevator.particles.geometry.dispose();
+            elevator.particles.material.dispose();
+        }
+    });
+    gameMode.spaceElevators = [];
+
+    // Build a map from node ID to planet mesh
+    const nodeIdToMesh = new Map();
+    gameMode.nodeMeshes.forEach(mesh => {
+        const data = gameMode.nodeDataMap.get(mesh.uuid);
+        if (data) {
+            nodeIdToMesh.set(data.id, mesh);
+        }
+    });
+
+    // Get all edges
+    const allEdges = edges.get();
+    if (!allEdges || allEdges.length === 0) return;
+
+    // Limit elevators to prevent performance issues
+    const maxElevators = 50;
+    const sortedEdges = allEdges
+        .filter(edge => !edge.hidden)
+        .sort((a, b) => (b.packetCount || 0) - (a.packetCount || 0))
+        .slice(0, maxElevators);
+
+    sortedEdges.forEach(edge => {
+        const fromMesh = nodeIdToMesh.get(edge.from);
+        const toMesh = nodeIdToMesh.get(edge.to);
+
+        if (!fromMesh || !toMesh) return;
+
+        // Get positions
+        const fromPos = fromMesh.position.clone();
+        const toPos = toMesh.position.clone();
+
+        // Get planet sizes for offset
+        const fromData = gameMode.nodeDataMap.get(fromMesh.uuid);
+        const toData = gameMode.nodeDataMap.get(toMesh.uuid);
+        const fromSize = fromData ? fromData.size : 1500;
+        const toSize = toData ? toData.size : 1500;
+
+        // Calculate direction and offset from planet surfaces
+        const direction = new THREE.Vector3().subVectors(toPos, fromPos).normalize();
+        const startPos = fromPos.clone().add(direction.clone().multiplyScalar(fromSize * 1.1));
+        const endPos = toPos.clone().sub(direction.clone().multiplyScalar(toSize * 1.1));
+
+        // Create the elevator beam
+        const points = [];
+        const segments = 32;
+        for (let i = 0; i <= segments; i++) {
+            const t = i / segments;
+            // Add slight curve for visual interest
+            const midHeight = Math.sin(t * Math.PI) * 500;
+            const perpendicular = new THREE.Vector3(-direction.z, 0, direction.x).normalize();
+            const point = new THREE.Vector3().lerpVectors(startPos, endPos, t);
+            point.add(perpendicular.clone().multiplyScalar(midHeight * 0.3));
+            point.y += midHeight;
+            points.push(point);
+        }
+
+        const curve = new THREE.CatmullRomCurve3(points);
+        const curvePoints = curve.getPoints(64);
+
+        // Main beam (tube-like appearance)
+        const beamGeometry = new THREE.BufferGeometry().setFromPoints(curvePoints);
+        const protocolColor = edge.protocol ? new THREE.Color(edge.protocol.Color) : new THREE.Color(0x00ffcc);
+        const beamMaterial = new THREE.LineBasicMaterial({
+            color: protocolColor,
+            transparent: true,
+            opacity: 0.6,
+            linewidth: 2
+        });
+        const beam = new THREE.Line(beamGeometry, beamMaterial);
+
+        // Outer glow effect
+        const glowMaterial = new THREE.LineBasicMaterial({
+            color: protocolColor,
+            transparent: true,
+            opacity: 0.15,
+            linewidth: 4
+        });
+        const glow = new THREE.Line(beamGeometry.clone(), glowMaterial);
+
+        // Create particles traveling along the beam
+        const particleCount = Math.min(20, Math.max(5, Math.floor((edge.packetCount || 1) / 10)));
+        const particleGeometry = new THREE.BufferGeometry();
+        const particlePositions = new Float32Array(particleCount * 3);
+        const particleSizes = new Float32Array(particleCount);
+        const particleProgress = new Float32Array(particleCount);
+
+        for (let i = 0; i < particleCount; i++) {
+            particleProgress[i] = Math.random(); // Random starting position along curve
+            particleSizes[i] = 80 + Math.random() * 120;
+
+            // Initial position
+            const point = curve.getPoint(particleProgress[i]);
+            particlePositions[i * 3] = point.x;
+            particlePositions[i * 3 + 1] = point.y;
+            particlePositions[i * 3 + 2] = point.z;
+        }
+
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+        particleGeometry.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+
+        const particleMaterial = new THREE.PointsMaterial({
+            color: protocolColor,
+            size: 100,
+            transparent: true,
+            opacity: 0.9,
+            blending: THREE.AdditiveBlending,
+            sizeAttenuation: true
+        });
+
+        const particles = new THREE.Points(particleGeometry, particleMaterial);
+
+        // Add to scene
+        gameMode.scene.add(beam);
+        gameMode.scene.add(glow);
+        gameMode.scene.add(particles);
+
+        // Store elevator data for animation
+        gameMode.spaceElevators.push({
+            line: beam,
+            glow: glow,
+            particles: particles,
+            curve: curve,
+            particleProgress: particleProgress,
+            particleCount: particleCount,
+            speed: 0.002 + (edge.packetCount || 1) * 0.00001, // Speed based on traffic
+            fromMesh: fromMesh,
+            toMesh: toMesh,
+            edge: edge
+        });
+    });
+}
+
+// Animate space elevator particles
+function animateSpaceElevators() {
+    gameMode.spaceElevators.forEach(elevator => {
+        // Update particle positions along the curve
+        const positions = elevator.particles.geometry.attributes.position.array;
+
+        for (let i = 0; i < elevator.particleCount; i++) {
+            // Move particle along curve
+            elevator.particleProgress[i] += elevator.speed;
+            if (elevator.particleProgress[i] > 1) {
+                elevator.particleProgress[i] = 0;
+            }
+
+            // Get new position on curve
+            const point = elevator.curve.getPoint(elevator.particleProgress[i]);
+            positions[i * 3] = point.x;
+            positions[i * 3 + 1] = point.y;
+            positions[i * 3 + 2] = point.z;
+        }
+
+        elevator.particles.geometry.attributes.position.needsUpdate = true;
+
+        // Update beam endpoints to follow planet positions
+        const fromPos = elevator.fromMesh.position.clone();
+        const toPos = elevator.toMesh.position.clone();
+
+        const fromData = gameMode.nodeDataMap.get(elevator.fromMesh.uuid);
+        const toData = gameMode.nodeDataMap.get(elevator.toMesh.uuid);
+        const fromSize = fromData ? fromData.size : 1500;
+        const toSize = toData ? toData.size : 1500;
+
+        const direction = new THREE.Vector3().subVectors(toPos, fromPos).normalize();
+        const startPos = fromPos.clone().add(direction.clone().multiplyScalar(fromSize * 1.1));
+        const endPos = toPos.clone().sub(direction.clone().multiplyScalar(toSize * 1.1));
+
+        // Rebuild curve with new endpoints
+        const points = [];
+        const segments = 32;
+        for (let j = 0; j <= segments; j++) {
+            const t = j / segments;
+            const midHeight = Math.sin(t * Math.PI) * 500;
+            const perpendicular = new THREE.Vector3(-direction.z, 0, direction.x).normalize();
+            const point = new THREE.Vector3().lerpVectors(startPos, endPos, t);
+            point.add(perpendicular.clone().multiplyScalar(midHeight * 0.3));
+            point.y += midHeight;
+            points.push(point);
+        }
+
+        elevator.curve = new THREE.CatmullRomCurve3(points);
+        const curvePoints = elevator.curve.getPoints(64);
+
+        // Update line geometry
+        elevator.line.geometry.setFromPoints(curvePoints);
+        elevator.glow.geometry.setFromPoints(curvePoints);
+    });
+}
+
+// ==================== WARP DRIVE SYSTEM ====================
+
+// Open warp drive search overlay
+function openWarpDrive() {
+    if (gameMode.isWarping) return;
+
+    gameMode.warpDriveActive = true;
+    gameMode.warpSelectedIndex = 0;
+    gameMode.warpResults = [];
+
+    const overlay = document.getElementById('warpDriveOverlay');
+    const input = document.getElementById('warpSearchInput');
+    const results = document.getElementById('warpDriveResults');
+    const status = document.getElementById('warpDriveStatus');
+
+    if (overlay) {
+        overlay.classList.add('active');
+        status.textContent = 'READY';
+        status.className = 'warp-drive-status';
+        results.innerHTML = '<div class="warp-no-results">Type to search for a destination...</div>';
+    }
+
+    if (input) {
+        input.value = '';
+        input.focus();
+
+        // Add input listener
+        input.oninput = () => updateWarpSearch(input.value);
+    }
+
+    // Exit pointer lock for typing
+    document.exitPointerLock();
+}
+
+// Close warp drive overlay
+function closeWarpDrive() {
+    gameMode.warpDriveActive = false;
+    gameMode.warpResults = [];
+
+    const overlay = document.getElementById('warpDriveOverlay');
+    const input = document.getElementById('warpSearchInput');
+
+    if (overlay) {
+        overlay.classList.remove('active');
+    }
+
+    if (input) {
+        input.oninput = null;
+        input.value = '';
+    }
+}
+
+// Update warp search results
+function updateWarpSearch(query) {
+    const results = document.getElementById('warpDriveResults');
+    if (!results) return;
+
+    if (!query || query.length < 1) {
+        results.innerHTML = '<div class="warp-no-results">Type to search for a destination...</div>';
+        gameMode.warpResults = [];
+        return;
+    }
+
+    const queryLower = query.toLowerCase();
+    const matches = [];
+
+    // Search through all nodes
+    const allNodes = nodes.get();
+    allNodes.forEach(node => {
+        const nodeMatches = [];
+
+        // Check ID (IP address)
+        if (node.id && node.id.toLowerCase().includes(queryLower)) {
+            nodeMatches.push({ type: 'IP', value: node.id });
+        }
+
+        // Check label (hostname)
+        if (node.label && node.label.toLowerCase().includes(queryLower)) {
+            nodeMatches.push({ type: 'Hostname', value: node.label });
+        }
+
+        // Check MAC addresses
+        if (node.macs) {
+            node.macs.forEach(mac => {
+                if (mac.toLowerCase().includes(queryLower)) {
+                    nodeMatches.push({ type: 'MAC', value: mac });
+                }
+            });
+        }
+
+        // Check title for additional data
+        if (node.title && node.title.toLowerCase().includes(queryLower)) {
+            nodeMatches.push({ type: 'Data', value: 'Packet data match' });
+        }
+
+        if (nodeMatches.length > 0) {
+            matches.push({
+                node: node,
+                matches: nodeMatches
+            });
+        }
+    });
+
+    // Also search edges for protocol matches
+    const allEdges = edges.get();
+    allEdges.forEach(edge => {
+        if (edge.protocol && edge.protocol.Name && edge.protocol.Name.toLowerCase().includes(queryLower)) {
+            // Find the source node for this edge
+            const sourceNode = allNodes.find(n => n.id === edge.from);
+            if (sourceNode && !matches.find(m => m.node.id === sourceNode.id)) {
+                matches.push({
+                    node: sourceNode,
+                    matches: [{ type: 'Protocol', value: edge.protocol.Name }]
+                });
+            }
+        }
+    });
+
+    // Search through packet payloads
+    const allCachedPackets = Array.from(packetCache.values());
+    if (allCachedPackets && allCachedPackets.length > 0 && query.length >= 2) {
+        const queryBytes = stringToBytes(queryLower);
+
+        allCachedPackets.forEach(packet => {
+            if (!packet.payload) return;
+
+            try {
+                const payloadBytes = base64ToBytes(packet.payload);
+
+                if (searchInPayload(payloadBytes, queryBytes)) {
+                    // Find the source node for this packet
+                    const sourceNode = allNodes.find(n => n.id === packet.src ||
+                        (n.ips && n.ips.includes(packet.src)));
+
+                    if (sourceNode) {
+                        let existingMatch = matches.find(m => m.node.id === sourceNode.id);
+                        if (!existingMatch) {
+                            existingMatch = {
+                                node: sourceNode,
+                                matches: []
+                            };
+                            matches.push(existingMatch);
+                        }
+
+                        // Add payload match if not already present
+                        if (!existingMatch.matches.find(m => m.type === 'Payload')) {
+                            const payloadPreview = getPayloadPreview(payloadBytes, queryBytes);
+                            existingMatch.matches.push({
+                                type: 'Payload',
+                                value: `"${payloadPreview}"`
+                            });
+                        }
+                    }
+                }
+            } catch (e) {
+                // Skip packets with invalid payload data
+            }
+        });
+    }
+
+    gameMode.warpResults = matches.slice(0, 10); // Limit to 10 results
+    gameMode.warpSelectedIndex = 0;
+
+    if (matches.length === 0) {
+        results.innerHTML = '<div class="warp-no-results">No destinations found for "' + query + '"</div>';
+        return;
+    }
+
+    // Render results
+    results.innerHTML = gameMode.warpResults.map((result, index) => {
+        const node = result.node;
+        const packetCount = extractPacketCount(node.title) || 0;
+        const matchText = result.matches.map(m => `${m.type}: ${m.value}`).join(' | ');
+
+        return `
+            <div class="warp-result-item ${index === 0 ? 'selected' : ''}" data-index="${index}">
+                <div class="warp-result-hostname">${node.label || node.id}</div>
+                <div class="warp-result-details">
+                    <span>IP: ${node.id}</span>
+                    <span>Packets: ${packetCount.toLocaleString()}</span>
+                </div>
+                <div class="warp-result-match">${matchText}</div>
+            </div>
+        `;
+    }).join('');
+
+    // Add click handlers
+    results.querySelectorAll('.warp-result-item').forEach(item => {
+        item.onclick = () => {
+            const index = parseInt(item.dataset.index);
+            selectWarpDestination(index);
+        };
+    });
+}
+
+// Update selected result highlight
+function updateWarpSelection() {
+    const results = document.getElementById('warpDriveResults');
+    if (!results) return;
+
+    results.querySelectorAll('.warp-result-item').forEach((item, index) => {
+        if (index === gameMode.warpSelectedIndex) {
+            item.classList.add('selected');
+            item.scrollIntoView({ block: 'nearest' });
+        } else {
+            item.classList.remove('selected');
+        }
+    });
+}
+
+// Select and warp to destination
+function selectWarpDestination(index) {
+    if (index === undefined) index = gameMode.warpSelectedIndex;
+    if (!gameMode.warpResults[index]) return;
+
+    const result = gameMode.warpResults[index];
+    const targetNode = result.node;
+
+    // Find the planet mesh for this node
+    let targetMesh = null;
+    for (const mesh of gameMode.nodeMeshes) {
+        const data = gameMode.nodeDataMap.get(mesh.uuid);
+        if (data && data.id === targetNode.id) {
+            targetMesh = mesh;
+            break;
+        }
+    }
+
+    if (!targetMesh) {
+        console.warn('Could not find planet for node:', targetNode.id);
+        closeWarpDrive();
+        return;
+    }
+
+    // Start warp sequence
+    initiateWarp(targetMesh, targetNode);
+}
+
+// Initiate warp travel to destination
+function initiateWarp(targetMesh, targetNode) {
+    gameMode.isWarping = true;
+
+    const status = document.getElementById('warpDriveStatus');
+    if (status) {
+        status.textContent = 'ENGAGING';
+        status.className = 'warp-drive-status warping';
+    }
+
+    // Close search overlay after brief delay
+    setTimeout(() => {
+        closeWarpDrive();
+    }, 300);
+
+    // Show warp effect
+    const effectOverlay = document.getElementById('warpEffectOverlay');
+    const streaksContainer = document.getElementById('warpStreaks');
+    const destinationLabel = document.getElementById('warpDestination');
+
+    if (effectOverlay) {
+        effectOverlay.classList.add('active');
+
+        // Create warp streaks
+        if (streaksContainer) {
+            streaksContainer.innerHTML = '';
+            for (let i = 0; i < 60; i++) {
+                const streak = document.createElement('div');
+                streak.className = 'warp-streak';
+                const angle = (Math.random() * 360);
+                const delay = Math.random() * 0.3;
+                streak.style.transform = `rotate(${angle}deg)`;
+                streak.style.animationDelay = `${delay}s`;
+                streak.style.left = `${50 + (Math.random() - 0.5) * 20}%`;
+                streak.style.top = `${50 + (Math.random() - 0.5) * 20}%`;
+                streaksContainer.appendChild(streak);
+            }
+        }
+
+        // Show destination name
+        if (destinationLabel) {
+            destinationLabel.textContent = targetNode.label || targetNode.id;
+        }
+    }
+
+    // Get target position (slightly in front of planet)
+    const targetData = gameMode.nodeDataMap.get(targetMesh.uuid);
+    const planetSize = targetData ? targetData.size : 2000;
+    const targetPos = targetMesh.position.clone();
+
+    // Calculate viewing position (in front of and slightly above the planet)
+    const cameraOffset = planetSize * 3;
+    const viewDirection = new THREE.Vector3()
+        .subVectors(gameMode.camera.position, targetPos)
+        .normalize();
+
+    const finalPosition = targetPos.clone().add(viewDirection.multiplyScalar(cameraOffset));
+    finalPosition.y += planetSize * 0.5;
+
+    // Store starting position
+    const startPosition = gameMode.camera.position.clone();
+    const startTime = Date.now();
+    const warpDuration = 2000; // 2 seconds
+
+    // Animate warp travel
+    function animateWarp() {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / warpDuration, 1);
+
+        // Easing function for smooth acceleration/deceleration
+        const easeProgress = progress < 0.5
+            ? 4 * progress * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+
+        // Update camera position
+        gameMode.camera.position.lerpVectors(startPosition, finalPosition, easeProgress);
+
+        // Make camera look at target during warp
+        const lookAtProgress = Math.min(progress * 1.5, 1);
+        if (lookAtProgress < 1) {
+            const currentTarget = new THREE.Vector3().lerpVectors(
+                startPosition.clone().add(new THREE.Vector3(0, 0, -1000)),
+                targetPos,
+                lookAtProgress
+            );
+            gameMode.camera.lookAt(currentTarget);
+        } else {
+            gameMode.camera.lookAt(targetPos);
+        }
+
+        if (progress < 1) {
+            requestAnimationFrame(animateWarp);
+        } else {
+            // Warp complete
+            completeWarp(targetMesh, targetNode);
+        }
+    }
+
+    animateWarp();
+}
+
+// Complete warp sequence
+function completeWarp(targetMesh, targetNode) {
+    // Flash effect
+    const container = document.getElementById('gameModeContainer');
+    const flash = document.createElement('div');
+    flash.className = 'warp-flash active';
+    container.appendChild(flash);
+
+    setTimeout(() => {
+        flash.remove();
+    }, 600);
+
+    // Hide warp effect
+    const effectOverlay = document.getElementById('warpEffectOverlay');
+    if (effectOverlay) {
+        effectOverlay.classList.remove('active');
+        const streaksContainer = document.getElementById('warpStreaks');
+        if (streaksContainer) streaksContainer.innerHTML = '';
+    }
+
+    // Lock onto the target
+    gameMode.lockedTarget = { mesh: targetMesh, data: targetNode };
+
+    // Update targeting UI
+    const reticle = document.getElementById('targetingReticle');
+    const targetPanel = document.querySelector('.hud-panel-right');
+    if (reticle) reticle.classList.add('locked');
+    if (targetPanel) targetPanel.classList.add('locked');
+
+    // Show planet info
+    const planetInfoScreen = document.getElementById('planetInfoScreen');
+    if (planetInfoScreen) {
+        planetInfoScreen.classList.add('show');
+        const packetCount = extractPacketCount(targetNode.title) || 0;
+        planetInfoScreen.innerHTML = `
+            <h4>DESTINATION REACHED</h4>
+            <div class="info-item"><strong>ID:</strong> ${targetNode.id}</div>
+            <div class="info-item"><strong>HOST:</strong> ${targetNode.label || 'Unknown'}</div>
+            <div class="info-item"><strong>PACKETS:</strong> ${packetCount.toLocaleString()}</div>
+        `;
+    }
+
+    gameMode.isWarping = false;
+
+    // Reset camera velocity
+    gameMode.currentSpeed = 0;
+    gameMode.velocity.set(0, 0, 0);
+}
+
+// Handle warp drive keyboard input
+function handleWarpKeyDown(e) {
+    if (!gameMode.warpDriveActive) return false;
+
+    switch (e.key) {
+        case 'Escape':
+            closeWarpDrive();
+            return true;
+
+        case 'ArrowDown':
+            e.preventDefault();
+            if (gameMode.warpResults.length > 0) {
+                gameMode.warpSelectedIndex = (gameMode.warpSelectedIndex + 1) % gameMode.warpResults.length;
+                updateWarpSelection();
+            }
+            return true;
+
+        case 'ArrowUp':
+            e.preventDefault();
+            if (gameMode.warpResults.length > 0) {
+                gameMode.warpSelectedIndex = (gameMode.warpSelectedIndex - 1 + gameMode.warpResults.length) % gameMode.warpResults.length;
+                updateWarpSelection();
+            }
+            return true;
+
+        case 'Enter':
+            e.preventDefault();
+            if (gameMode.warpResults.length > 0) {
+                selectWarpDestination();
+            }
+            return true;
+    }
+
+    return false;
+}
+
+// ==================== END WARP DRIVE SYSTEM ====================
+
+// Get node color based on traffic
+function getNodeColor(node) {
+    const title = node.title || '';
+    const packets = extractPacketCount(title);
+
+    // Color gradient based on traffic intensity
+    if (packets > 1000) return 0xff4444; // Red - high traffic
+    if (packets > 500) return 0xff8844; // Orange
+    if (packets > 100) return 0xffcc44; // Yellow
+    if (packets > 10) return 0x44ff88; // Green
+    return 0x4488ff; // Blue - low traffic
+}
+
+// Animation loop
+function animateGameScene() {
+    if (!gameMode.active) return;
+
+    gameMode.animationId = requestAnimationFrame(animateGameScene);
+
+    // Handle movement with realistic spacecraft physics
+    const maxSpeed = 150;  // Cruising speed for vast distances
+    const boostSpeed = 400; // When holding shift
+    const acceleration = 0.02;  // Slow, realistic acceleration
+    const deceleration = 0.015; // Gradual slowdown (space has no friction but thrusters)
+    const direction = new THREE.Vector3();
+
+    // Calculate target speed - slower, more deliberate movement
+    let targetForwardSpeed = 0;
+    const currentMaxSpeed = gameMode.boosting ? boostSpeed : maxSpeed;
+    if (gameMode.moveForward) targetForwardSpeed = -currentMaxSpeed;
+    if (gameMode.moveBackward) targetForwardSpeed = currentMaxSpeed * 0.5; // Reverse is slower
+
+    // Very smooth speed interpolation for realistic feel
+    if (targetForwardSpeed !== 0) {
+        gameMode.currentSpeed += (targetForwardSpeed - gameMode.currentSpeed) * acceleration;
+    } else {
+        gameMode.currentSpeed *= (1 - deceleration);
+        if (Math.abs(gameMode.currentSpeed) < 0.5) gameMode.currentSpeed = 0;
+    }
+
+    direction.z = gameMode.currentSpeed;
+    // Strafe is slower than forward movement
+    if (gameMode.moveLeft) direction.x -= currentMaxSpeed * 0.3;
+    if (gameMode.moveRight) direction.x += currentMaxSpeed * 0.3;
+    if (gameMode.moveUp) direction.y += currentMaxSpeed * 0.2;
+    if (gameMode.moveDown) direction.y -= currentMaxSpeed * 0.2;
+
+    // Apply camera rotation to movement
+    direction.applyQuaternion(gameMode.camera.quaternion);
+    gameMode.camera.position.add(direction);
+
+    // Update speed effects
+    updateSpeedEffects();
+
+    // Animate planets with realistic motion
+    gameMode.nodeMeshes.forEach(planetGroup => {
+        const data = gameMode.nodeDataMap.get(planetGroup.uuid);
+        if (data) {
+            // Orbital motion
+            data.orbitAngle += data.orbitSpeed;
+            planetGroup.position.x = Math.cos(data.orbitAngle) * data.orbitRadius;
+            planetGroup.position.z = Math.sin(data.orbitAngle) * data.orbitRadius;
+            planetGroup.position.y += Math.sin(data.orbitAngle * 2) * data.orbitTilt * 0.5;
+
+            // Planet self-rotation
+            if (planetGroup.children[0]) {
+                planetGroup.children[0].rotation.y += data.rotationSpeed;
+            }
+
+            // Animate moons
+            planetGroup.children.forEach(child => {
+                if (child.userData.moonOrbitRadius) {
+                    child.userData.moonOrbitAngle += child.userData.moonOrbitSpeed;
+                    child.position.x = Math.cos(child.userData.moonOrbitAngle) * child.userData.moonOrbitRadius;
+                    child.position.z = Math.sin(child.userData.moonOrbitAngle) * child.userData.moonOrbitRadius;
+                }
+            });
+        }
+    });
+
+    // Animate space elevators (node-to-node communication beams)
+    animateSpaceElevators();
+
+    // Slowly rotate starfield for parallax effect
+    if (gameMode.stars) {
+        gameMode.stars.rotation.y += 0.00003;
+        gameMode.stars.rotation.x += 0.00001;
+    }
+
+    // Animate star twinkling
+    if (gameMode.starTwinkleData) {
+        const time = Date.now() * 0.001;
+
+        // Twinkle bright stars
+        if (gameMode.starTwinkleData.brightStars) {
+            const { material, baseSize, phases } = gameMode.starTwinkleData.brightStars;
+            const twinkleFactor = 0.3;
+            let avgTwinkle = 0;
+            for (let i = 0; i < Math.min(phases.length, 100); i++) {
+                avgTwinkle += Math.sin(time * (1 + (i % 10) * 0.1) + phases[i]);
+            }
+            avgTwinkle = avgTwinkle / 100;
+            material.size = baseSize * (1 + avgTwinkle * twinkleFactor);
+        }
+
+        // Twinkle super bright stars more dramatically
+        if (gameMode.starTwinkleData.superBright) {
+            const { material, baseSize, phases } = gameMode.starTwinkleData.superBright;
+            const twinkleFactor = 0.4;
+            let avgTwinkle = 0;
+            for (let i = 0; i < Math.min(phases.length, 50); i++) {
+                avgTwinkle += Math.sin(time * 0.8 * (1 + (i % 5) * 0.2) + phases[i]);
+            }
+            avgTwinkle = avgTwinkle / 50;
+            material.size = baseSize * (1 + avgTwinkle * twinkleFactor);
+            material.opacity = 0.85 + avgTwinkle * 0.15;
+        }
+    }
+
+    // Occasional shooting stars
+    if (Math.random() < 0.002 && !gameMode.shootingStar) {
+        createShootingStar();
+    }
+
+    // Update shooting star if active
+    if (gameMode.shootingStar) {
+        updateShootingStar();
+    }
+
+    // Animate nebulae with subtle drift
+    gameMode.nebulae.forEach((nebula, i) => {
+        nebula.rotation.y += 0.00002 * (i % 2 === 0 ? 1 : -1);
+        nebula.rotation.z += 0.00001;
+        // Subtle pulsing
+        nebula.material.opacity = nebula.userData.baseOpacity * (0.9 + 0.1 * Math.sin(Date.now() * 0.0005 + i));
+    });
+
+    // Animate sun flares - rotate and pulse
+    if (gameMode.sunFlares) {
+        gameMode.sunFlares.rotation.y += 0.0003;
+        gameMode.sunFlares.rotation.x += 0.0001;
+        gameMode.sunFlares.material.opacity = 0.5 + 0.2 * Math.sin(Date.now() * 0.001);
+    }
+
+    // Animate asteroids
+    gameMode.scene.children.forEach(child => {
+        if (child.userData && child.userData.isAsteroid) {
+            child.userData.orbitAngle += child.userData.orbitSpeed;
+            child.position.x = Math.cos(child.userData.orbitAngle) * child.userData.orbitRadius;
+            child.position.z = Math.sin(child.userData.orbitAngle) * child.userData.orbitRadius;
+
+            child.rotation.x += child.userData.rotationSpeed.x;
+            child.rotation.y += child.userData.rotationSpeed.y;
+            child.rotation.z += child.userData.rotationSpeed.z;
+        }
+    });
+
+    // Move ambient dust with camera for parallax
+    if (gameMode.ambientDust) {
+        gameMode.ambientDust.position.x = gameMode.camera.position.x;
+        gameMode.ambientDust.position.y = gameMode.camera.position.y;
+        gameMode.ambientDust.position.z = gameMode.camera.position.z;
+        gameMode.ambientDust.rotation.y += 0.0001;
+    }
+
+    // Animate blinky buttons
+    for (let i = 0; i < 8; i++) {
+        const button = gameMode.camera.getObjectByName("blinky_button_" + i);
+        if (button) {
+            button.material.emissiveIntensity = 0.4 + Math.abs(Math.sin(Date.now() * 0.003 * (i + 1))) * 0.6;
+        }
+    }
+
+    // Animate warning lights
+    for (let i = 0; i < 4; i++) {
+        const warning = gameMode.camera.getObjectByName("warning_light_" + i);
+        if (warning) {
+            warning.material.opacity = 0.5 + Math.abs(Math.sin(Date.now() * 0.004 + i * 1.5)) * 0.5;
+        }
+    }
+
+    // Animate holographic display
+    const holoDisplay = gameMode.camera.getObjectByName("holo_display");
+    if (holoDisplay) {
+        holoDisplay.material.opacity = 0.08 + Math.abs(Math.sin(Date.now() * 0.002)) * 0.07;
+    }
+
+    // Auto-lock targeting - find nearest planet to screen center
+    const reticle = document.getElementById('targetingReticle');
+    const targetPanel = document.querySelector('.hud-panel-right');
+    const targetIp = document.getElementById('targetIp');
+    const targetPackets = document.getElementById('targetPackets');
+    const hostnameLabel = document.getElementById('planetHostnameLabel');
+    const hostnameText = document.getElementById('hostnameText');
+    const hostnameIpText = document.getElementById('hostnameIp');
+
+    const screenCenterX = window.innerWidth / 2;
+    const screenCenterY = window.innerHeight / 2;
+    const autoLockRadius = 300; // Pixels from center to auto-lock
+
+    let nearestPlanet = null;
+    let nearestDistance = Infinity;
+    let nearestScreenPos = null;
+
+    // Check all planets and find the nearest one to screen center
+    gameMode.nodeMeshes.forEach(group => {
+        const nodeData = gameMode.nodeDataMap.get(group.uuid);
+        if (!nodeData) return;
+
+        // Project planet position to screen
+        const vector = group.position.clone();
+        vector.project(gameMode.camera);
+
+        // Check if in front of camera
+        if (vector.z > 1) return;
+
+        const screenX = (vector.x * 0.5 + 0.5) * window.innerWidth;
+        const screenY = (-(vector.y * 0.5) + 0.5) * window.innerHeight;
+
+        // Calculate distance from screen center
+        const dx = screenX - screenCenterX;
+        const dy = screenY - screenCenterY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        // Check if within auto-lock radius and closer than current nearest
+        if (distance < autoLockRadius && distance < nearestDistance) {
+            nearestDistance = distance;
+            nearestPlanet = { mesh: group, data: nodeData };
+            nearestScreenPos = { x: screenX, y: screenY };
+        }
+    });
+
+    if (nearestPlanet) {
+        // Lock onto nearest planet
+        reticle.classList.add('locked');
+        if (targetPanel) targetPanel.classList.add('locked');
+        gameMode.lockedTarget = nearestPlanet;
+        gameMode.autoLockPosition = nearestScreenPos;
+
+        // Move reticle to planet position
+        reticle.style.left = nearestScreenPos.x + 'px';
+        reticle.style.top = nearestScreenPos.y + 'px';
+        reticle.style.transform = 'translate(-50%, -50%)';
+
+        // Update target info in Shodan HUD style
+        if (targetIp) targetIp.textContent = nearestPlanet.data.id;
+        if (targetPackets) targetPackets.textContent = nearestPlanet.data.packetCount.toLocaleString();
+
+        // Show floating hostname label above the reticle
+        if (hostnameLabel) {
+            hostnameLabel.classList.add('visible', 'locked');
+            hostnameLabel.style.left = nearestScreenPos.x + 'px';
+            hostnameLabel.style.top = (nearestScreenPos.y - 50) + 'px';
+
+            // Get hostname (label) and IP
+            const hostname = nearestPlanet.data.label || nearestPlanet.data.id;
+            const ip = nearestPlanet.data.id;
+
+            if (hostnameText) hostnameText.textContent = hostname;
+            if (hostnameIpText) hostnameIpText.textContent = ip !== hostname ? ip : '';
+        }
+    } else {
+        // No target - reset reticle to center
+        reticle.classList.remove('locked');
+        if (targetPanel) targetPanel.classList.remove('locked');
+        if (targetIp) targetIp.textContent = '---';
+        if (targetPackets) targetPackets.textContent = '---';
+        gameMode.lockedTarget = null;
+        gameMode.autoLockPosition = { x: screenCenterX, y: screenCenterY };
+
+        // Reset reticle to center
+        reticle.style.left = '50%';
+        reticle.style.top = '50%';
+        reticle.style.transform = 'translate(-50%, -50%)';
+
+        // Hide hostname label
+        if (hostnameLabel) {
+            hostnameLabel.classList.remove('visible', 'locked');
+        }
+    }
+
+    // Render
+    gameMode.renderer.render(gameMode.scene, gameMode.camera);
+}
+
+// Update speed visual effects
+function updateSpeedEffects() {
+    const speedLines = document.getElementById('speedLines');
+    const warpTunnel = document.getElementById('warpTunnel');
+    const speedFill = document.getElementById('speedFill');
+    const speedValue = document.getElementById('speedValue');
+    const velocityBar = document.querySelector('.hud-velocity-bar');
+
+    const absSpeed = Math.abs(gameMode.currentSpeed);
+    const maxDisplaySpeed = gameMode.boosting ? 400 : 150;
+    const speedPercent = Math.min((absSpeed / maxDisplaySpeed) * 100, 100);
+
+    // Update speed bar
+    if (speedFill) {
+        speedFill.style.width = speedPercent + '%';
+        // Change color when boosting
+        if (gameMode.boosting && absSpeed > 100) {
+            speedFill.style.background = 'linear-gradient(90deg, rgba(255, 100, 50, 0.8), rgba(255, 200, 50, 1), rgba(255, 255, 150, 1))';
+            speedFill.style.boxShadow = '0 0 15px rgba(255, 150, 50, 0.8), inset 0 0 5px rgba(255, 255, 255, 0.5)';
+        } else {
+            speedFill.style.background = '';
+            speedFill.style.boxShadow = '';
+        }
+    }
+    if (speedValue) speedValue.textContent = Math.round(absSpeed);
+
+    // Determine direction
+    const isReverse = gameMode.currentSpeed > 0;
+    if (speedFill) speedFill.classList.toggle('reverse', isReverse);
+    if (speedLines) speedLines.classList.toggle('reverse', isReverse);
+    if (warpTunnel) warpTunnel.classList.toggle('reverse', isReverse);
+
+    // Activate effects based on speed
+    if (absSpeed > 50) {
+        if (speedLines) speedLines.classList.add('active');
+        if (!gameMode.speedLinesActive) {
+            gameMode.speedLinesActive = true;
+            // Regenerate speed lines with random positions
+            if (speedLines) {
+                const lines = speedLines.querySelectorAll('.speed-line');
+                lines.forEach(line => {
+                    line.style.left = Math.random() * 100 + '%';
+                    line.style.animationDelay = Math.random() * 0.3 + 's';
+                });
+            }
+        }
+    } else {
+        if (speedLines) speedLines.classList.remove('active');
+        gameMode.speedLinesActive = false;
+    }
+
+    // Warp tunnel at high speed or when boosting
+    if (absSpeed > 200 || (gameMode.boosting && absSpeed > 100)) {
+        if (warpTunnel) warpTunnel.classList.add('active');
+    } else {
+        if (warpTunnel) warpTunnel.classList.remove('active');
+    }
+}
+
+// Handle keyboard input for movement
+function handleGameKeyDown(e) {
+    if (!gameMode.active) return;
+
+    // Handle warp drive input first
+    if (gameMode.warpDriveActive) {
+        if (handleWarpKeyDown(e)) return;
+    }
+
+    // Check for "/" key to open warp drive
+    if (e.key === '/' && !gameMode.warpDriveActive && !gameMode.isWarping) {
+        e.preventDefault();
+        openWarpDrive();
+        return;
+    }
+
+    switch (e.code) {
+        case 'KeyW':
+            gameMode.moveForward = true;
+            break;
+        case 'KeyS':
+            gameMode.moveBackward = true;
+            break;
+        case 'KeyA':
+            gameMode.moveLeft = true;
+            break;
+        case 'KeyD':
+            gameMode.moveRight = true;
+            break;
+        case 'Space':
+            gameMode.moveUp = true;
+            break;
+        case 'ControlLeft':
+        case 'ControlRight':
+        case 'KeyC':
+            gameMode.moveDown = true;
+            break;
+        case 'ShiftLeft':
+        case 'ShiftRight':
+            gameMode.boosting = true;
+            break;
+        case 'Escape':
+            // Close warp drive if open, otherwise exit game mode
+            if (gameMode.warpDriveActive) {
+                closeWarpDrive();
+            } else {
+                toggleGameMode();
+            }
+            break;
+    }
+}
+
+function handleGameKeyUp(e) {
+    if (!gameMode.active) return;
+
+    switch (e.code) {
+        case 'KeyW':
+            gameMode.moveForward = false;
+            break;
+        case 'KeyS':
+            gameMode.moveBackward = false;
+            break;
+        case 'KeyA':
+            gameMode.moveLeft = false;
+            break;
+        case 'KeyD':
+            gameMode.moveRight = false;
+            break;
+        case 'Space':
+            gameMode.moveUp = false;
+            break;
+        case 'ControlLeft':
+        case 'ControlRight':
+        case 'KeyC':
+            gameMode.moveDown = false;
+            break;
+        case 'ShiftLeft':
+        case 'ShiftRight':
+            gameMode.boosting = false;
+            break;
+    }
+}
+
+// Handle mouse movement for camera rotation
+function handleGameMouseMove(e) {
+    if (!gameMode.active) return;
+    if (document.pointerLockElement !== document.getElementById('gameCanvas')) return;
+
+    const movementX = e.movementX || 0;
+    const movementY = e.movementY || 0;
+
+    gameMode.euler.setFromQuaternion(gameMode.camera.quaternion);
+
+    gameMode.euler.y -= movementX * 0.002;
+    gameMode.euler.x -= movementY * 0.002;
+
+    // Clamp vertical rotation
+    gameMode.euler.x = Math.max(-gameMode.PI_2, Math.min(gameMode.PI_2, gameMode.euler.x));
+
+    gameMode.camera.quaternion.setFromEuler(gameMode.euler);
+}
+
+// Handle click for shooting laser
+function handleGameClick(e) {
+    if (!gameMode.active) return;
+    if (gameMode.laserCooldown) return;
+
+    // Request pointer lock if not locked
+    if (document.pointerLockElement !== document.getElementById('gameCanvas')) {
+        document.getElementById('gameCanvas').requestPointerLock();
+        return;
+    }
+
+    // Fire laser
+    fireLaser();
+}
+
+// Fire laser effect - moving projectile beams from bottom corners to reticle
+function fireLaser() {
+    if (gameMode.laserCooldown) return;
+    gameMode.laserCooldown = true;
+
+    const container = document.getElementById('gameModeContainer');
+    const reticle = document.getElementById('targetingReticle');
+    const containerRect = container.getBoundingClientRect();
+
+    // Get reticle position (center of screen or locked target position)
+    let targetX = containerRect.width / 2;
+    let targetY = containerRect.height / 2;
+
+    if (reticle && gameMode.autoLockPosition) {
+        targetX = gameMode.autoLockPosition.x;
+        targetY = gameMode.autoLockPosition.y;
+    }
+
+    // Bottom corner positions
+    const leftStart = { x: 40, y: containerRect.height - 60 };
+    const rightStart = { x: containerRect.width - 40, y: containerRect.height - 60 };
+
+    // Create and animate left laser
+    const laserLeft = document.createElement('div');
+    laserLeft.className = 'laser-beam laser-left';
+    container.appendChild(laserLeft);
+    animateLaserProjectile(laserLeft, leftStart, { x: targetX, y: targetY }, 200);
+
+    // Create and animate right laser
+    const laserRight = document.createElement('div');
+    laserRight.className = 'laser-beam laser-right';
+    container.appendChild(laserRight);
+    animateLaserProjectile(laserRight, rightStart, { x: targetX, y: targetY }, 200);
+
+    // Remove after animation
+    setTimeout(() => {
+        laserLeft.remove();
+        laserRight.remove();
+        gameMode.laserCooldown = false;
+    }, 250);
+
+    // Check if we hit a target
+    if (gameMode.lockedTarget) {
+        const { mesh, data } = gameMode.lockedTarget;
+
+        // Create hit effect in 3D scene
+        createHitEffect(mesh.position.clone(), data);
+
+        // Flash the planet
+        if (mesh.children && mesh.children[0] && mesh.children[0].material) {
+            const planet = mesh.children[0];
+            const originalEmissive = planet.material.emissiveIntensity;
+            planet.material.emissiveIntensity = 1;
+            setTimeout(() => {
+                planet.material.emissiveIntensity = originalEmissive;
+            }, 200);
+        }
+
+        // Create packet data explosion
+        createPacketExplosion(mesh.position.clone(), data);
+
+        // Show detailed stats
+        showNodeScanResult(data);
+
+        // Show planet info screen
+        const planetInfoScreen = document.getElementById('planetInfoScreen');
+        planetInfoScreen.classList.add('show');
+        planetInfoScreen.innerHTML = `
+            <h4>PLANET SCAN</h4>
+            <div class="info-item"><strong>ID:</strong> ${data.id}</div>
+            <div class="info-item"><strong>HOST:</strong> ${data.label || 'Unknown'}</div>
+            <div class="info-item"><strong>PACKETS:</strong> ${data.packetCount.toLocaleString()}</div>
+            <div class="info-item"><strong>BYTES:</strong> ${extractByteCount(data.title) || 'N/A'}</div>
+        `;
+
+        // Fetch and display a random TCP stream
+        displayRandomStream(data);
+    }
+}
+
+// Fetch and display a random TCP stream in tail-like fashion
+async function displayRandomStream(nodeData) {
+    const terminal = document.getElementById('streamTerminal');
+    const title = document.getElementById('streamTerminalTitle');
+    const status = document.getElementById('streamTerminalStatus');
+    const content = document.getElementById('streamTerminalContent');
+
+    if (!terminal || !content) return;
+
+    // Show terminal
+    terminal.style.display = 'block';
+    content.innerHTML = '<span class="stream-cursor">_</span>';
+    status.textContent = 'CONNECTING...';
+    status.className = 'stream-terminal-status connecting';
+
+    try {
+        // Fetch available streams
+        const streamsResponse = await fetch('/api/streams');
+        if (!streamsResponse.ok) throw new Error('Failed to fetch streams');
+
+        const streams = await streamsResponse.json();
+        if (!streams || streams.length === 0) {
+            content.innerHTML = '<span class="stream-error">NO STREAMS AVAILABLE</span>';
+            status.textContent = 'NO DATA';
+            return;
+        }
+
+        // Pick a random stream
+        const randomStream = streams[Math.floor(Math.random() * streams.length)];
+
+        // Update title with stream info
+        title.textContent = `// TCP STREAM [${randomStream.src_port || '?'} → ${randomStream.dst_port || '?'}]`;
+        status.textContent = 'STREAMING';
+        status.className = 'stream-terminal-status active';
+
+        // Fetch the stream content
+        const streamResponse = await fetch(`/api/stream?id=${randomStream.id}`);
+        if (!streamResponse.ok) throw new Error('Failed to fetch stream content');
+
+        const streamData = await streamResponse.json();
+        const streamText = streamData.data || streamData.content || JSON.stringify(streamData, null, 2);
+
+        // Display in tail-like fashion (character by character)
+        content.innerHTML = '';
+        displayStreamText(content, streamText, 0);
+
+    } catch (error) {
+        console.error('Stream fetch error:', error);
+        content.innerHTML = `<span class="stream-error">ERROR: ${error.message}</span>`;
+        status.textContent = 'ERROR';
+        status.className = 'stream-terminal-status error';
+    }
+}
+
+// Display text character by character like tail
+function displayStreamText(container, text, index) {
+    if (index >= text.length || index >= 2000) { // Limit to 2000 chars
+        // Add blinking cursor at end
+        const cursor = document.createElement('span');
+        cursor.className = 'stream-cursor';
+        cursor.textContent = '_';
+        container.appendChild(cursor);
+
+        // Update status
+        const status = document.getElementById('streamTerminalStatus');
+        if (status) {
+            status.textContent = 'COMPLETE';
+            status.className = 'stream-terminal-status complete';
+        }
+        return;
+    }
+
+    const char = text[index];
+
+    if (char === '\n') {
+        container.appendChild(document.createElement('br'));
+    } else if (char === ' ') {
+        container.appendChild(document.createTextNode('\u00A0'));
+    } else {
+        const span = document.createElement('span');
+        span.textContent = char;
+        span.className = 'stream-char';
+        container.appendChild(span);
+    }
+
+    // Auto-scroll to bottom
+    container.scrollTop = container.scrollHeight;
+
+    // Speed varies: faster for spaces/newlines, slower for other chars
+    const delay = (char === ' ' || char === '\n') ? 5 : 15;
+
+    setTimeout(() => {
+        displayStreamText(container, text, index + 1);
+    }, delay);
+}
+
+// Animate laser projectile from start to end position
+function animateLaserProjectile(laser, start, end, duration) {
+    const startTime = performance.now();
+
+    // Calculate angle from start to end
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    // Set initial position and rotation
+    laser.style.left = start.x + 'px';
+    laser.style.top = start.y + 'px';
+    laser.style.transform = `rotate(${angle}deg)`;
+    laser.style.transformOrigin = 'center center';
+
+    function animate(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+
+        // Ease out for smooth deceleration
+        const easeProgress = 1 - Math.pow(1 - progress, 2);
+
+        // Calculate current position along the path
+        const currentX = start.x + dx * easeProgress;
+        const currentY = start.y + dy * easeProgress;
+
+        laser.style.left = currentX + 'px';
+        laser.style.top = currentY + 'px';
+
+        // Fade out near the end
+        if (progress > 0.7) {
+            laser.style.opacity = 1 - ((progress - 0.7) / 0.3);
+        }
+
+        if (progress < 1) {
+            requestAnimationFrame(animate);
+        }
+    }
+
+    requestAnimationFrame(animate);
+}
+
+// Create hit effect at position
+function createHitEffect(position, data) {
+    // Project 3D position to 2D screen
+    const vector = position.clone();
+    vector.project(gameMode.camera);
+
+    const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-(vector.y * 0.5) + 0.5) * window.innerHeight;
+
+    // Create hit effect element
+    const container = document.getElementById('gameModeContainer');
+    const hit = document.createElement('div');
+    hit.className = 'hit-effect';
+    hit.style.left = x + 'px';
+    hit.style.top = y + 'px';
+    container.appendChild(hit);
+
+    // Remove after animation
+    setTimeout(() => hit.remove(), 300);
+}
+
+// Create packet data explosion effect
+function createPacketExplosion(position, data) {
+    // Project 3D position to 2D screen
+    const vector = position.clone();
+    vector.project(gameMode.camera);
+
+    const centerX = (vector.x * 0.5 + 0.5) * window.innerWidth;
+    const centerY = (-(vector.y * 0.5) + 0.5) * window.innerHeight;
+
+    const container = document.getElementById('gameModeContainer');
+
+    // Create explosion container
+    const explosion = document.createElement('div');
+    explosion.className = 'packet-explosion';
+    explosion.style.left = centerX + 'px';
+    explosion.style.top = centerY + 'px';
+
+    // Generate packet data particles
+    const particleData = [
+        { text: data.id, type: 'ip', delay: 0 },
+        { text: data.label || 'Unknown Host', type: 'hostname', delay: 50 },
+        { text: `${data.packetCount.toLocaleString()} packets`, type: 'packets', delay: 100 },
+        { text: extractByteCount(data.title) || 'N/A bytes', type: 'bytes', delay: 150 },
+        { text: data.planetType ? data.planetType.toUpperCase() : 'UNKNOWN', type: 'protocol', delay: 200 },
+    ];
+
+    // Add port info if available from title
+    const portMatch = data.title?.match(/Port:\s*(\d+)/);
+    if (portMatch) {
+        particleData.push({ text: `Port ${portMatch[1]}`, type: 'port', delay: 250 });
+    }
+
+    // Add additional random packet info
+    const extraInfo = [
+        'TCP SYN',
+        'ACK',
+        'PSH',
+        'FIN',
+        'RST',
+        'HTTP/1.1',
+        'TLS 1.3',
+        'DNS Query',
+        'ICMP Echo'
+    ];
+
+    // Add 3-5 random extra particles
+    const extraCount = 3 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < extraCount; i++) {
+        particleData.push({
+            text: extraInfo[Math.floor(Math.random() * extraInfo.length)],
+            type: ['packets', 'bytes', 'protocol', 'port'][Math.floor(Math.random() * 4)],
+            delay: 300 + i * 80
+        });
+    }
+
+    particleData.forEach((item, index) => {
+        setTimeout(() => {
+            const particle = document.createElement('div');
+            particle.className = `packet-particle ${item.type}`;
+            particle.textContent = item.text;
+
+            // Random explosion direction
+            const angle = (index / particleData.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+            const distance = 60 + Math.random() * 80;
+            const tx = Math.cos(angle) * distance;
+            const ty = Math.sin(angle) * distance;
+
+            particle.style.setProperty('--tx', tx + 'px');
+            particle.style.setProperty('--ty', ty + 'px');
+
+            explosion.appendChild(particle);
+        }, item.delay);
+    });
+
+    container.appendChild(explosion);
+
+    // Remove explosion container after all animations complete
+    setTimeout(() => explosion.remove(), 2500);
+}
+
+// Show detailed node scan result
+function showNodeScanResult(data) {
+    const targetPanel = document.querySelector('.hud-panel-right');
+
+    // Flash the target panel on hit
+    if (targetPanel) {
+        targetPanel.style.animation = 'none';
+        targetPanel.offsetHeight; // Trigger reflow
+        targetPanel.style.animation = 'hudHitFlash 0.3s ease-out';
+        setTimeout(() => targetPanel.style.animation = '', 300);
+    }
+
+    // Could show more detailed packet info here
+    console.log('Scanned node:', data);
+}
+
+// Update game HUD with current stats
+function updateGameHUD() {
+    const nodeCount = nodes.length || nodes.getIds().length;
+    let totalPackets = 0;
+
+    // Sum packets from all nodes
+    nodes.get().forEach(node => {
+        totalPackets += extractPacketCount(node.title) || 0;
+    });
+
+    document.getElementById('gameNodeCount').textContent = nodeCount;
+    document.getElementById('gamePacketCount').textContent = totalPackets.toLocaleString();
+}
+
+// Handle window resize for game mode
+function handleGameResize() {
+    if (!gameMode.active || !gameMode.camera || !gameMode.renderer) return;
+
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    gameMode.camera.aspect = width / height;
+    gameMode.camera.updateProjectionMatrix();
+    gameMode.renderer.setSize(width, height);
+}
+
+// Refresh game nodes when network data updates
+function refreshGameNodes() {
+    if (!gameMode.active) return;
+
+    createNodeSpheres();
+    createSpaceElevators();
+    updateGameHUD();
 }
 
 // Start the application when DOM is ready
